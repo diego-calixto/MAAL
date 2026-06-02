@@ -39,7 +39,7 @@ torch.set_float32_matmul_precision('high')
 # =============================================================================
 
 # Image preprocessing
-IMAGE_SIZE: int = 224
+IMAGE_SIZE: int = 384
 IMAGENET_MEAN: np.ndarray = np.array([0.485, 0.456, 0.406])
 IMAGENET_STD: np.ndarray = np.array([0.229, 0.224, 0.225])
 
@@ -48,13 +48,25 @@ NUM_CLASSES_CLS: int = 2
 NUM_CLASSES_SEG: int = 1
 BACKBONE_CHANNELS: int = 2048
 
+# Attention supervision stage
+# 2 -> 28x28, 3 -> 14x14, 4 -> 7x7 for input 384
+ATTENTION_FEATURE_LEVEL: int = 3
+
 # Loss weights
 LOSS_WEIGHT_CLS: float = 1.0
 LOSS_WEIGHT_SEG: float = 1.0
 LOSS_WEIGHT_ATTENTION: float = 0.5
 
+# Segmentation loss options
+# options: 'bce', 'dice', 'bce_dice', 'focal_tversky'
+SEGMENTATION_LOSS_TYPE: str = "focal_tversky"
+SEGMENTATION_POS_WEIGHT: float = 20.0
+FOCAL_TVERSKY_ALPHA: float = 0.3
+FOCAL_TVERSKY_BETA: float = 0.7
+FOCAL_TVERSKY_GAMMA: float = 1.0
+
 # Training hyperparameters
-BATCH_SIZE: int = 16
+BATCH_SIZE: int = 32
 NUM_EPOCHS: int = 10
 LEARNING_RATE: float = 1e-4
 WEIGHT_DECAY: float = 1e-4
@@ -164,11 +176,38 @@ class AttentionHead(nn.Module):
         return self.attention(x)
 
 
+class FocalTverskyLoss(nn.Module):
+    def __init__(self, alpha=0.3, beta=0.7, gamma=1.0, smooth=1e-6):
+        super(FocalTverskyLoss, self).__init__()
+        self.alpha = alpha
+        self.beta = beta
+        self.gamma = gamma
+        self.smooth = smooth
+
+    def forward(self, logits, targets):
+        probs = torch.sigmoid(logits)
+        targets = targets.float()
+
+        tp = (probs * targets).sum(dim=(1, 2, 3))
+        fp = (probs * (1 - targets)).sum(dim=(1, 2, 3))
+        fn = ((1 - probs) * targets).sum(dim=(1, 2, 3))
+
+        tversky = (tp + self.smooth) / (tp + self.alpha * fp + self.beta * fn + self.smooth)
+        loss = torch.pow((1.0 - tversky), self.gamma)
+        return loss.mean()
+
+
 class MultiTaskNetwork(nn.Module):
     def __init__(self, num_classes_cls=2):
         super(MultiTaskNetwork, self).__init__()
         self.encoder = SharedEncoder()
-        self.attention_head = AttentionHead(in_channels=BACKBONE_CHANNELS)
+
+        attention_feature_channels = {
+            2: 512,
+            3: 1024,
+            4: 2048
+        }.get(ATTENTION_FEATURE_LEVEL, BACKBONE_CHANNELS)
+        self.attention_head = AttentionHead(in_channels=attention_feature_channels)
 
         # Classification branch uses attention-gated encoder features.
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
@@ -180,9 +219,15 @@ class MultiTaskNetwork(nn.Module):
         features = self.encoder(x)
         f_final = features[-1]
 
-        # Learned spatial attention focuses classification on crack regions.
-        attention_map = self.attention_head(f_final)
-        gated_features = f_final * attention_map
+        attention_features = features[ATTENTION_FEATURE_LEVEL]
+        attention_map = self.attention_head(attention_features)
+        attention_map_resized = F.interpolate(
+            attention_map,
+            size=f_final.shape[2:],
+            mode='bilinear',
+            align_corners=True
+        )
+        gated_features = f_final * attention_map_resized
 
         x_cls_feat = self.avgpool(gated_features)
         x_cls_flat = torch.flatten(x_cls_feat, 1)
@@ -198,14 +243,30 @@ class MultiTaskNetwork(nn.Module):
 # =============================================================================
 
 class MultiTaskLoss(nn.Module):
-    def __init__(self, w_cls=1.0, w_seg=1.0, w_attn=0.5):
+    def __init__(
+        self,
+        w_cls=1.0,
+        w_seg=1.0,
+        w_attn=0.5,
+        seg_loss_type="bce",
+        seg_pos_weight=1.0,
+        ft_alpha=0.7,
+        ft_beta=0.3,
+        ft_gamma=0.75
+    ):
         super(MultiTaskLoss, self).__init__()
         self.w_cls = w_cls
         self.w_seg = w_seg
         self.w_attn = w_attn
         self.cls_criterion = nn.CrossEntropyLoss()
-        self.seg_criterion = nn.BCEWithLogitsLoss()
+        self.seg_loss_type = seg_loss_type
         self.attn_criterion = nn.BCELoss()
+
+        if self.seg_loss_type == "focal_tversky":
+            self.seg_criterion = FocalTverskyLoss(alpha=ft_alpha, beta=ft_beta, gamma=ft_gamma)
+        else:
+            pos_weight = torch.tensor([seg_pos_weight], device=DEVICE) if seg_pos_weight is not None else None
+            self.seg_criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
     def forward(self, y_cls_pred, y_cls_true, y_seg_pred, y_seg_true, attention_map):
         # Classification loss
@@ -218,14 +279,31 @@ class MultiTaskLoss(nn.Module):
             mode='bilinear',
             align_corners=True
         )
-        loss_bce = self.seg_criterion(y_seg_pred, y_seg_target)
+        y_seg_target = y_seg_target.float()
+
         pred_probs = torch.sigmoid(y_seg_pred)
         intersection = (pred_probs * y_seg_target).sum(dim=(1, 2, 3))
         union = pred_probs.sum(dim=(1, 2, 3)) + y_seg_target.sum(dim=(1, 2, 3))
         dice_score = (2.0 * intersection + EPSILON) / (union + EPSILON)
         loss_dice = 1.0 - dice_score
         loss_dice = loss_dice.mean()
-        loss_seg = loss_bce + loss_dice
+
+        loss_bce = torch.tensor(0.0, device=y_seg_pred.device)
+
+        # Apply selected segmentation loss type
+        if self.seg_loss_type == "bce":
+            loss_bce = self.seg_criterion(y_seg_pred, y_seg_target)
+            loss_seg = loss_bce
+        elif self.seg_loss_type == "dice":
+            loss_seg = loss_dice
+        elif self.seg_loss_type == "bce_dice":
+            loss_bce = self.seg_criterion(y_seg_pred, y_seg_target)
+            loss_seg = loss_bce + loss_dice
+        elif self.seg_loss_type == "focal_tversky":
+            loss_seg = self.seg_criterion(y_seg_pred, y_seg_target)
+            loss_dice = torch.tensor(0.0, device=y_seg_pred.device)
+        else:
+            raise ValueError(f"Unknown seg_loss_type: {self.seg_loss_type}")
 
         # Attention supervision encourages the model to focus on crack regions.
         attention_target = F.interpolate(
@@ -343,19 +421,19 @@ CONFIG = {
     "weight_decay": WEIGHT_DECAY,
     "device": DEVICE,
     "img_size": IMAGE_SIZE,
-    "use_autocast": True,
-    "batch_size": 32,
+    "use_autocast": False,
     "use_compile": False,
     "attention_weight": LOSS_WEIGHT_ATTENTION
 }
 
 
 def calculate_iou(pred_mask: torch.Tensor, true_mask: torch.Tensor, threshold: float = 0.5) -> torch.Tensor:
-    """Calculate Intersection over Union metric."""
+    """Calculate Intersection over Union metric per image in batch, then average."""
     pred_bin = (torch.sigmoid(pred_mask) > threshold).float()
-    intersection = (pred_bin * true_mask).sum()
-    union = pred_bin.sum() + true_mask.sum() - intersection
-    return (intersection + EPSILON) / (union + EPSILON)
+    intersection = (pred_bin * true_mask).sum(dim=(1, 2, 3))
+    union = pred_bin.sum(dim=(1, 2, 3)) + true_mask.sum(dim=(1, 2, 3)) - intersection
+    iou = (intersection + EPSILON) / (union + EPSILON)
+    return iou.mean()
 
 
 def train_one_epoch(model, loader, optimizer, criterion, device, scaler):
@@ -546,12 +624,21 @@ def run_training_pipeline(df, n_splits=5):
         model = MultiTaskNetwork(num_classes_cls=2).to(CONFIG['device'])
         if CONFIG.get('use_compile', False) and hasattr(torch, 'compile'):
             model = torch.compile(model)
-        criterion = MultiTaskLoss(w_cls=1.0, w_seg=1.0, w_attn=CONFIG['attention_weight']).to(CONFIG['device'])
+        criterion = MultiTaskLoss(
+            w_cls=1.0,
+            w_seg=1.0,
+            w_attn=CONFIG['attention_weight'],
+            seg_loss_type=SEGMENTATION_LOSS_TYPE,
+            seg_pos_weight=SEGMENTATION_POS_WEIGHT,
+            ft_alpha=FOCAL_TVERSKY_ALPHA,
+            ft_beta=FOCAL_TVERSKY_BETA,
+            ft_gamma=FOCAL_TVERSKY_GAMMA
+        ).to(CONFIG['device'])
         optimizer = torch.optim.AdamW(model.parameters(), lr=CONFIG['lr'], weight_decay=CONFIG['weight_decay'])
         scaler = GradScaler()
 
         # LR scheduler (reduce LR when val IoU plateaus) and early stopping
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=3, verbose=True)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=3)
 
         best_f1 = 0.0
         best_v_iou = 0.0

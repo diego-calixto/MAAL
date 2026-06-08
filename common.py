@@ -1,0 +1,321 @@
+import os
+
+import cv2
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import Dataset, DataLoader
+from torchvision import models, transforms
+try:
+    from torchvision.models import ResNet50_Weights
+except ImportError:
+    ResNet50_Weights = None
+
+from sklearn.model_selection import GroupKFold
+from sklearn.metrics import f1_score, accuracy_score
+from tqdm import tqdm
+
+# Shared constants for both model experiments
+IMAGE_SIZE = 384
+IMAGENET_MEAN = np.array([0.485, 0.456, 0.406])
+IMAGENET_STD = np.array([0.229, 0.224, 0.225])
+BATCH_SIZE = 32
+NUM_EPOCHS = 10
+LEARNING_RATE = 1e-4
+WEIGHT_DECAY = 1e-4
+NUM_WORKERS = 8
+N_SPLITS = 5
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+DATASET_DIR = "processed_dataset_MTL"
+VALID_IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png'}
+MASK_BINARY_THRESHOLD = 0.5
+USE_AUTOCAST = False
+USE_COMPILE = False
+ALIGNMENT_WEIGHT = 0.5
+EPSILON = 1e-8
+
+
+class SharedEncoder(nn.Module):
+    def __init__(self, pretrained=True):
+        super(SharedEncoder, self).__init__()
+        if ResNet50_Weights is not None:
+            weights = ResNet50_Weights.IMAGENET1K_V1 if pretrained else None
+            resnet = models.resnet50(weights=weights)
+        else:
+            resnet = models.resnet50(pretrained=pretrained)
+
+        self.initial = nn.Sequential(resnet.conv1, resnet.bn1, resnet.relu, resnet.maxpool)
+        self.layer1 = resnet.layer1
+        self.layer2 = resnet.layer2
+        self.layer3 = resnet.layer3
+        self.layer4 = resnet.layer4
+
+    def forward(self, x):
+        features = []
+        x0 = self.initial(x)
+        features.append(x0)
+        x1 = self.layer1(x0)
+        features.append(x1)
+        x2 = self.layer2(x1)
+        features.append(x2)
+        x3 = self.layer3(x2)
+        features.append(x3)
+        x4 = self.layer4(x3)
+        features.append(x4)
+        return features
+
+
+class SegmentationDecoder(nn.Module):
+    def __init__(self, num_classes=1):
+        super(SegmentationDecoder, self).__init__()
+        self.up4 = self.conv_block(2048 + 1024, 1024)
+        self.up3 = self.conv_block(1024 + 512, 512)
+        self.up2 = self.conv_block(512 + 256, 256)
+
+        self.final_conv = nn.Sequential(
+            nn.Upsample(scale_factor=4, mode='bilinear', align_corners=True),
+            nn.Conv2d(256, 64, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Dropout2d(p=0.2),
+            nn.Conv2d(64, num_classes, kernel_size=1)
+        )
+
+    def conv_block(self, in_c, out_c):
+        return nn.Sequential(
+            nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True),
+            nn.Conv2d(in_c, out_c, kernel_size=3, padding=1),
+            nn.BatchNorm2d(out_c),
+            nn.ReLU(),
+            nn.Dropout2d(p=0.2)
+        )
+
+    def match_tensor(self, tensor_target, tensor_ref):
+        if tensor_target.size()[2:] != tensor_ref.size()[2:]:
+            return F.interpolate(tensor_target, size=tensor_ref.size()[2:], mode='bilinear', align_corners=True)
+        return tensor_target
+
+    def forward(self, features):
+        d4 = self.up4(torch.cat([features[4], self.match_tensor(features[3], features[4])], dim=1))
+        d3 = self.up3(torch.cat([d4, self.match_tensor(features[2], d4)], dim=1))
+        d2 = self.up2(torch.cat([d3, self.match_tensor(features[1], d3)], dim=1))
+        out_seg = self.final_conv(d2)
+        return out_seg
+
+
+class CrackDataset(Dataset):
+    def __init__(self, df, img_size=IMAGE_SIZE, augment=False):
+        self.df = df
+        self.img_size = img_size
+        self.augment = augment
+        self.to_tensor = transforms.ToTensor()
+        self.normalize = transforms.Normalize(mean=IMAGENET_MEAN.tolist(), std=IMAGENET_STD.tolist())
+
+    def __len__(self):
+        return len(self.df)
+
+    def __getitem__(self, idx):
+        row = self.df.iloc[idx]
+        image = cv2.imread(row['path'])
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+        mask = cv2.imread(row['mask_path'], cv2.IMREAD_GRAYSCALE)
+        if mask is None:
+            mask = np.zeros((image.shape[0], image.shape[1]), dtype=np.float32)
+        else:
+            mask = mask.astype(np.float32) / 255.0
+            mask = (mask > 0.5).astype(np.float32)
+
+        image = cv2.resize(image, (self.img_size, self.img_size), interpolation=cv2.INTER_LINEAR)
+        mask = cv2.resize(mask, (self.img_size, self.img_size), interpolation=cv2.INTER_NEAREST)
+
+        if self.augment and np.random.rand() > 0.5:
+            image = np.fliplr(image).copy()
+            mask = np.fliplr(mask).copy()
+
+        image = self.to_tensor(image)
+        image = self.normalize(image)
+        mask = torch.tensor(mask, dtype=torch.float32).unsqueeze(0)
+
+        return image, torch.tensor(row['label'], dtype=torch.long), mask
+
+
+def prepare_dataframe(dataset_dir):
+    data = []
+
+    for label_name in ['Positive', 'Negative']:
+        # Caminho aponta para a pasta de IMAGENS
+        class_dir_img = os.path.join(dataset_dir, label_name, 'images')
+
+        if not os.path.exists(class_dir_img):
+            continue
+
+        label = 1 if label_name == 'Positive' else 0
+
+        for entry in os.scandir(class_dir_img):
+            if entry.name.endswith('.jpg'):
+                # group_id para o Cross Validation (evita vazamento de dados)
+                group_id = entry.name.split('_')[0]
+
+                # O caminho da máscara é inferido trocando pastas e extensão
+                # Ex: .../Positive/images/foto.jpg -> .../Positive/masks/foto.png
+                mask_path = entry.path.replace('images', 'masks').replace('.jpg', '.png')
+
+                data.append({
+                    'path': entry.path,
+                    'mask_path': mask_path,
+                    'filename': entry.name,
+                    'label': label,
+                    'group': group_id
+                })
+
+    return pd.DataFrame(data)
+
+
+if __name__ == '__main__':
+    df = prepare_dataframe('processed_dataset_MTL')
+    print(f"Registros criados: {len(df)}")
+    if len(df) > 0:
+        print("Exemplo de caminho imagem:", df.iloc[0]['path'])
+        print("Exemplo de caminho máscara:", df.iloc[0]['mask_path'])
+
+
+def calculate_iou(pred_mask: torch.Tensor, true_mask: torch.Tensor, threshold: float = 0.5) -> torch.Tensor:
+    pred_bin = (torch.sigmoid(pred_mask) > threshold).float()
+    intersection = (pred_bin * true_mask).sum(dim=(1, 2, 3))
+    union = pred_bin.sum(dim=(1, 2, 3)) + true_mask.sum(dim=(1, 2, 3)) - intersection
+    iou = (intersection + EPSILON) / (union + EPSILON)
+    return iou.mean()
+
+
+def train_one_epoch(model, loader, optimizer, criterion, device, scaler):
+    model.train()
+    running_loss = 0.0
+    all_preds_cls = []
+    all_targets_cls = []
+    total_iou = 0.0
+
+    pbar = tqdm(loader, desc="Training", leave=False)
+    for images, targets_cls, targets_seg in pbar:
+        images = images.to(device)
+        targets_cls = targets_cls.to(device)
+        targets_seg = targets_seg.to(device)
+
+        optimizer.zero_grad()
+        with torch.autocast(enabled=USE_AUTOCAST, device_type=device):
+            y_cls, y_seg, alignment_map = model(images)
+            loss, _ = criterion(y_cls, targets_cls, y_seg, targets_seg, alignment_map)
+
+        if torch.isnan(loss):
+            print("WARNING: NaN loss detected. Skipping batch.")
+            continue
+
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
+
+        running_loss += loss.item()
+        preds_cls = torch.argmax(y_cls, dim=1)
+        all_preds_cls.extend(preds_cls.cpu().numpy())
+        all_targets_cls.extend(targets_cls.cpu().numpy())
+        total_iou += calculate_iou(y_seg, targets_seg).item()
+        pbar.set_postfix({'loss': loss.item()})
+
+    return running_loss / len(loader), accuracy_score(all_targets_cls, all_preds_cls), total_iou / len(loader)
+
+
+def validate_one_epoch(model, loader, criterion, device):
+    model.eval()
+    running_loss = 0.0
+    all_preds_cls = []
+    all_targets_cls = []
+    total_iou = 0.0
+
+    with torch.no_grad():
+        for images, targets_cls, targets_seg in tqdm(loader, desc="Validating", leave=False):
+            images = images.to(device)
+            targets_cls = targets_cls.to(device)
+            targets_seg = targets_seg.to(device)
+
+            with torch.autocast(enabled=USE_AUTOCAST, device_type=device):
+                y_cls, y_seg, alignment_map = model(images)
+                loss, _ = criterion(y_cls, targets_cls, y_seg, targets_seg, alignment_map)
+
+            running_loss += loss.item()
+            preds_cls = torch.argmax(y_cls, dim=1)
+            all_preds_cls.extend(preds_cls.cpu().numpy())
+            all_targets_cls.extend(targets_cls.cpu().numpy())
+            total_iou += calculate_iou(y_seg, targets_seg).item()
+
+    return running_loss / len(loader), accuracy_score(all_targets_cls, all_preds_cls), f1_score(all_targets_cls, all_preds_cls, average='binary'), total_iou / len(loader)
+
+
+def run_training_pipeline(run_name, model_factory, criterion_factory, df, n_splits=N_SPLITS):
+    gkf = GroupKFold(n_splits=n_splits)
+    fold_scores = []
+    pin_memory = DEVICE == 'cuda'
+
+    print(f"Running on: {DEVICE}")
+
+    for fold, (train_idx, val_idx) in enumerate(gkf.split(df, df['label'], df['group'])):
+        print(f"\n{'='*20} FOLD {fold+1}/{n_splits} {'='*20}")
+
+        train_df = df.iloc[train_idx]
+        val_df = df.iloc[val_idx]
+
+        train_loader = DataLoader(
+            CrackDataset(train_df, img_size=IMAGE_SIZE, augment=True),
+            batch_size=BATCH_SIZE,
+            shuffle=True,
+            num_workers=NUM_WORKERS,
+            pin_memory=pin_memory
+        )
+        val_loader = DataLoader(
+            CrackDataset(val_df, img_size=IMAGE_SIZE, augment=False),
+            batch_size=BATCH_SIZE,
+            shuffle=False,
+            num_workers=NUM_WORKERS,
+            pin_memory=pin_memory
+        )
+
+        model = model_factory().to(DEVICE)
+        if USE_COMPILE and hasattr(torch, 'compile'):
+            model = torch.compile(model)
+
+        criterion = criterion_factory().to(DEVICE)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=3)
+        scaler = torch.cuda.amp.GradScaler()
+
+        best_f1 = 0.0
+        best_v_iou = 0.0
+        es_patience = 6
+        es_wait = 0
+
+        for epoch in range(NUM_EPOCHS):
+            t_loss, t_acc, t_iou = train_one_epoch(model, train_loader, optimizer, criterion, DEVICE, scaler)
+            v_loss, v_acc, v_f1, v_iou = validate_one_epoch(model, val_loader, criterion, DEVICE)
+
+            print(
+                f"Epoch {epoch+1} | T_Loss: {t_loss:.3f} T_Acc: {t_acc:.3f} T_IoU: {t_iou:.3f} | "
+                f"V_Acc: {v_acc:.3f} V_F1: {v_f1:.3f} V_IoU: {v_iou:.3f}"
+            )
+
+            scheduler.step(v_iou)
+
+            if v_iou > best_v_iou:
+                best_v_iou = v_iou
+                best_f1 = max(best_f1, v_f1)
+                es_wait = 0
+                torch.save(model.state_dict(), f"best_{run_name}_fold_{fold}.pth")
+            else:
+                es_wait += 1
+                if es_wait >= es_patience:
+                    print(f"Early stopping after {es_patience} epochs without improvement.")
+                    break
+
+        fold_scores.append(best_v_iou)
+
+    print(f"\nMean Val IoU: {np.mean(fold_scores):.4f}")
+    return fold_scores

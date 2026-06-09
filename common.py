@@ -18,12 +18,13 @@ from sklearn.metrics import f1_score, accuracy_score
 from tqdm import tqdm
 
 # Shared constants for both model experiments
-IMAGE_SIZE = 384
+# Optimized for 80GB A100 GPU
+IMAGE_SIZE = 384  # Can increase to 448 or 512 if desired
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406])
 IMAGENET_STD = np.array([0.229, 0.224, 0.225])
-BATCH_SIZE = 32
-NUM_EPOCHS = 10
-LEARNING_RATE = 1e-4
+BATCH_SIZE = 96  # Increased from 32 (80GB VRAM allows this)
+NUM_EPOCHS = 15  # Increased from 10 for better convergence
+LEARNING_RATE = 1.5e-4  # Slightly increased due to larger batch size
 WEIGHT_DECAY = 1e-4
 NUM_WORKERS = 8
 N_SPLITS = 5
@@ -31,8 +32,8 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 DATASET_DIR = "processed_dataset_MTL"
 VALID_IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png'}
 MASK_BINARY_THRESHOLD = 0.5
-USE_AUTOCAST = False
-USE_COMPILE = False
+USE_AUTOCAST = False  # Disabled - causes issues on some systems
+USE_COMPILE = False  # Disabled - optional optimization
 ALIGNMENT_WEIGHT = 0.5
 EPSILON = 1e-8
 

@@ -23,7 +23,7 @@ IMAGE_SIZE = 384  # Can increase to 448 or 512 if desired
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406])
 IMAGENET_STD = np.array([0.229, 0.224, 0.225])
 BATCH_SIZE = 96  # Increased from 32 (80GB VRAM allows this)
-NUM_EPOCHS = 15  # Increased from 10 for better convergence
+NUM_EPOCHS = 30  # Increased from 10 for better convergence
 LEARNING_RATE = 1.5e-4  # Slightly increased due to larger batch size
 WEIGHT_DECAY = 1e-4
 NUM_WORKERS = 8
@@ -174,6 +174,27 @@ def prepare_dataframe(dataset_dir):
     return pd.DataFrame(data)
 
 
+def save_checkpoint(checkpoint: dict, path: str):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    torch.save(checkpoint, path)
+
+
+def load_checkpoint(path: str, model, optimizer=None, scaler=None, scheduler=None, device=DEVICE):
+    checkpoint = torch.load(path, map_location=device)
+    model.load_state_dict(checkpoint['model_state'])
+
+    if optimizer is not None and 'optimizer_state' in checkpoint:
+        optimizer.load_state_dict(checkpoint['optimizer_state'])
+
+    if scaler is not None and 'scaler_state' in checkpoint:
+        scaler.load_state_dict(checkpoint['scaler_state'])
+
+    if scheduler is not None and 'scheduler_state' in checkpoint:
+        scheduler.load_state_dict(checkpoint['scheduler_state'])
+
+    return checkpoint
+
+
 if __name__ == '__main__':
     df = prepare_dataframe('processed_dataset_MTL')
     print(f"Registros criados: {len(df)}")
@@ -252,15 +273,31 @@ def validate_one_epoch(model, loader, criterion, device):
     return running_loss / len(loader), accuracy_score(all_targets_cls, all_preds_cls), f1_score(all_targets_cls, all_preds_cls, average='binary'), total_iou / len(loader)
 
 
-def run_training_pipeline(run_name, model_factory, criterion_factory, df, n_splits=N_SPLITS):
+def run_training_pipeline(
+    run_name,
+    model_factory,
+    criterion_factory,
+    df,
+    n_splits=N_SPLITS,
+    checkpoint_dir='checkpoints',
+    resume_from=None,
+    save_every=1
+):
     gkf = GroupKFold(n_splits=n_splits)
     fold_scores = []
     pin_memory = DEVICE == 'cuda'
+    run_checkpoint_dir = os.path.join(checkpoint_dir, run_name)
+    os.makedirs(run_checkpoint_dir, exist_ok=True)
 
     print(f"Running on: {DEVICE}")
 
     for fold, (train_idx, val_idx) in enumerate(gkf.split(df, df['label'], df['group'])):
         print(f"\n{'='*20} FOLD {fold+1}/{n_splits} {'='*20}")
+
+        fold_dir = os.path.join(run_checkpoint_dir, f'fold_{fold}')
+        os.makedirs(fold_dir, exist_ok=True)
+        best_checkpoint_path = os.path.join(fold_dir, 'best.pt')
+        last_checkpoint_path = os.path.join(fold_dir, 'last.pt')
 
         train_df = df.iloc[train_idx]
         val_df = df.iloc[val_idx]
@@ -270,14 +307,16 @@ def run_training_pipeline(run_name, model_factory, criterion_factory, df, n_spli
             batch_size=BATCH_SIZE,
             shuffle=True,
             num_workers=NUM_WORKERS,
-            pin_memory=pin_memory
+            pin_memory=pin_memory,
+            persistent_workers=NUM_WORKERS > 0
         )
         val_loader = DataLoader(
             CrackDataset(val_df, img_size=IMAGE_SIZE, augment=False),
             batch_size=BATCH_SIZE,
             shuffle=False,
             num_workers=NUM_WORKERS,
-            pin_memory=pin_memory
+            pin_memory=pin_memory,
+            persistent_workers=NUM_WORKERS > 0
         )
 
         model = model_factory().to(DEVICE)
@@ -293,8 +332,17 @@ def run_training_pipeline(run_name, model_factory, criterion_factory, df, n_spli
         best_v_iou = 0.0
         es_patience = 6
         es_wait = 0
+        start_epoch = 0
 
-        for epoch in range(NUM_EPOCHS):
+        if resume_from is not None and os.path.exists(resume_from):
+            checkpoint = load_checkpoint(resume_from, model, optimizer, scaler, scheduler, device=DEVICE)
+            start_epoch = checkpoint.get('epoch', -1) + 1
+            best_v_iou = checkpoint.get('best_v_iou', best_v_iou)
+            best_f1 = checkpoint.get('best_f1', best_f1)
+            es_wait = checkpoint.get('es_wait', es_wait)
+            print(f"Resuming fold {fold} from checkpoint '{resume_from}' at epoch {start_epoch}.")
+
+        for epoch in range(start_epoch, NUM_EPOCHS):
             t_loss, t_acc, t_iou = train_one_epoch(model, train_loader, optimizer, criterion, DEVICE, scaler)
             v_loss, v_acc, v_f1, v_iou = validate_one_epoch(model, val_loader, criterion, DEVICE)
 
@@ -305,16 +353,39 @@ def run_training_pipeline(run_name, model_factory, criterion_factory, df, n_spli
 
             scheduler.step(v_iou)
 
-            if v_iou > best_v_iou:
+            is_best = v_iou > best_v_iou
+            if is_best:
                 best_v_iou = v_iou
                 best_f1 = max(best_f1, v_f1)
                 es_wait = 0
-                torch.save(model.state_dict(), f"best_{run_name}_fold_{fold}.pth")
             else:
                 es_wait += 1
-                if es_wait >= es_patience:
-                    print(f"Early stopping after {es_patience} epochs without improvement.")
-                    break
+
+            checkpoint_state = {
+                'run_name': run_name,
+                'fold': fold,
+                'epoch': epoch,
+                'model_state': model.state_dict(),
+                'optimizer_state': optimizer.state_dict(),
+                'scaler_state': scaler.state_dict(),
+                'scheduler_state': scheduler.state_dict(),
+                'best_v_iou': best_v_iou,
+                'best_f1': best_f1,
+                'es_wait': es_wait,
+            }
+
+            save_checkpoint(checkpoint_state, last_checkpoint_path)
+            if is_best:
+                save_checkpoint(checkpoint_state, best_checkpoint_path)
+                print(f"Saved best checkpoint: {best_checkpoint_path}")
+
+            if save_every > 0 and ((epoch + 1) % save_every == 0 or epoch == NUM_EPOCHS - 1):
+                epoch_checkpoint_path = os.path.join(fold_dir, f'epoch_{epoch+1:03d}.pt')
+                save_checkpoint(checkpoint_state, epoch_checkpoint_path)
+
+            if es_wait >= es_patience:
+                print(f"Early stopping after {es_patience} epochs without improvement.")
+                break
 
         fold_scores.append(best_v_iou)
 

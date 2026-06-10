@@ -1,3 +1,4 @@
+import argparse
 import os
 import cv2
 import torch
@@ -174,6 +175,11 @@ def visualize_model_predictions(model, loader, device, num_images=5):
 
 
 def main():
+    parser = argparse.ArgumentParser(description='Train MAAL multi-task model with checkpoint support.')
+    parser.add_argument('--checkpoint-dir', default='checkpoints', help='Directory to save checkpoint files')
+    parser.add_argument('--resume-from', default=None, help='Path to a checkpoint file to resume training from')
+    args = parser.parse_args()
+
     if os.path.exists(DATASET_DIR):
         df = prepare_dataframe(DATASET_DIR)
         print(f"DataFrame carregado com {len(df)} imagens.")
@@ -184,7 +190,9 @@ def main():
                 model_factory=lambda: MultiTaskNetwork(num_classes_cls=2, fusion_mode='learned_forward'),
                 criterion_factory=lambda: MultiTaskLoss(w_cls=1.0, w_seg=1.0, w_align=ALIGNMENT_WEIGHT),
                 df=df,
-                n_splits=N_SPLITS
+                n_splits=N_SPLITS,
+                checkpoint_dir=args.checkpoint_dir,
+                resume_from=args.resume_from
             )
         else:
             print("DataFrame vazio. Verifique se o dataset foi gerado corretamente.")

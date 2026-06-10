@@ -22,7 +22,7 @@ from tqdm import tqdm
 IMAGE_SIZE = 384  # Can increase to 448 or 512 if desired
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406])
 IMAGENET_STD = np.array([0.229, 0.224, 0.225])
-BATCH_SIZE = 96  # Increased from 32 (80GB VRAM allows this)
+BATCH_SIZE = 64  # Increased from 32 (80GB VRAM allows this)
 NUM_EPOCHS = 30  # Increased from 10 for better convergence
 LEARNING_RATE = 1.5e-4  # Slightly increased due to larger batch size
 WEIGHT_DECAY = 1e-4

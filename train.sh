@@ -4,6 +4,7 @@
 
 #SBATCH -p short-complex
 
+#SBATCH -w cluster-node9
 #SBATCH --gpus=1
 #SBATCH --mem=64G
 #SBATCH -c 16
@@ -16,5 +17,7 @@ module load Python3.10
 source $HOME/env_maal/bin/activate
 
 cd $HOME/MAAL
+
+export CUDA_LAUNCH_BLOCKING=1
 
 python Attention.py

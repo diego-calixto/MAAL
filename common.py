@@ -225,17 +225,22 @@ def train_one_epoch(model, loader, optimizer, criterion, device, scaler):
         targets_seg = targets_seg.to(device)
 
         optimizer.zero_grad()
-        with torch.autocast(enabled=USE_AUTOCAST, device_type=device):
+        with torch.autocast(enabled=USE_AUTOCAST, device_type='cuda' if device == 'cuda' else 'cpu'):
             y_cls, y_seg, alignment_map = model(images)
             loss, _ = criterion(y_cls, targets_cls, y_seg, targets_seg, alignment_map)
 
-        if torch.isnan(loss):
-            print("WARNING: NaN loss detected. Skipping batch.")
+        if not torch.isfinite(loss):
+            print("WARNING: non-finite loss detected. Skipping batch.")
+            print(f"  loss={loss}, shapes: images={tuple(images.shape)}, y_cls={tuple(y_cls.shape)}, y_seg={tuple(y_seg.shape)}, alignment_map={tuple(alignment_map.shape)}")
             continue
 
-        scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
+        if USE_AUTOCAST:
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            optimizer.step()
 
         running_loss += loss.item()
         preds_cls = torch.argmax(y_cls, dim=1)
@@ -326,7 +331,7 @@ def run_training_pipeline(
         criterion = criterion_factory().to(DEVICE)
         optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=3)
-        scaler = torch.cuda.amp.GradScaler()
+        scaler = torch.cuda.amp.GradScaler(enabled=USE_AUTOCAST)
 
         best_f1 = 0.0
         best_v_iou = 0.0

@@ -76,11 +76,20 @@ class SegmentationDecoder(nn.Module):
         self.up2 = self.conv_block(512 + 256, 256)
 
         self.final_conv = nn.Sequential(
-            nn.Upsample(scale_factor=4, mode='bilinear', align_corners=True),
-            nn.Conv2d(256, 64, kernel_size=3, padding=1),
+            # 1. Faz a convolução 3x3 pesada na resolução menor (96x96)
+            nn.Conv2d(256, 64, 3, padding=1),
             nn.ReLU(),
-            nn.Dropout2d(p=0.2),
-            nn.Conv2d(64, num_classes, kernel_size=1)
+            nn.Dropout2d(0.2),
+            
+            # 2. Faz o upsampling do tensor já leve (apenas 64 canais)
+            nn.Upsample(
+                scale_factor=4,
+                mode='bilinear',
+                align_corners=True
+            ), # Shape resultante aqui: [64, 64, 384, 384]
+            
+            # 3. Projeta para 1 canal final
+            nn.Conv2d(64, 1, 1)
         )
 
     def conv_block(self, in_c, out_c):

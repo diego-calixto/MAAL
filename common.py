@@ -235,8 +235,8 @@ def train_one_epoch(model, loader, optimizer, criterion, device, scaler):
 
         optimizer.zero_grad()
         with torch.autocast(enabled=USE_AUTOCAST, device_type='cuda' if device == 'cuda' else 'cpu'):
-            y_cls, y_seg, alignment_map = model(images)
-            loss, _ = criterion(y_cls, targets_cls, y_seg, targets_seg, alignment_map)
+            y_cls, y_seg, alignment_logits, alignment_map = model(images)
+            loss, _ = criterion(y_cls, targets_cls, y_seg, targets_seg, alignment_logits)
 
         if not torch.isfinite(loss):
             print("WARNING: non-finite loss detected. Skipping batch.")
@@ -275,8 +275,8 @@ def validate_one_epoch(model, loader, criterion, device):
             targets_seg = targets_seg.to(device)
 
             with torch.autocast(enabled=USE_AUTOCAST, device_type=device):
-                y_cls, y_seg, alignment_map = model(images)
-                loss, _ = criterion(y_cls, targets_cls, y_seg, targets_seg, alignment_map)
+                y_cls, y_seg, alignment_logits, alignment_map = model(images)
+                loss, _ = criterion(y_cls, targets_cls, y_seg, targets_seg, alignment_logits)
 
             running_loss += loss.item()
             preds_cls = torch.argmax(y_cls, dim=1)

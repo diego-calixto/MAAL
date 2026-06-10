@@ -42,8 +42,7 @@ class AttentionHead(nn.Module):
             nn.BatchNorm2d(64),
             nn.ReLU(inplace=True),
             nn.Dropout2d(p=0.2),
-            nn.Conv2d(64, 1, kernel_size=1),
-            nn.Sigmoid()
+            nn.Conv2d(64, 1, kernel_size=1)
         )
 
     def forward(self, x):
@@ -71,7 +70,8 @@ class MultiTaskNetwork(nn.Module):
         f_final = features[-1]
 
         attention_features = features[ATTENTION_FEATURE_LEVEL]
-        attention_map = self.attention_head(attention_features)
+        attention_logits = self.attention_head(attention_features)
+        attention_map = torch.sigmoid(attention_logits)
         attention_map_resized = F.interpolate(
             attention_map,
             size=f_final.shape[2:],
@@ -85,7 +85,7 @@ class MultiTaskNetwork(nn.Module):
         y_cls = self.fc(x_cls_flat)
 
         y_seg = self.decoder(features)
-        return y_cls, y_seg, attention_map
+        return y_cls, y_seg, attention_logits, attention_map
 
 
 class MultiTaskLoss(nn.Module):
@@ -96,9 +96,9 @@ class MultiTaskLoss(nn.Module):
         self.w_attn = w_attn
         self.cls_criterion = nn.CrossEntropyLoss()
         self.seg_criterion = nn.BCEWithLogitsLoss()
-        self.attn_criterion = nn.BCELoss()
+        self.attn_criterion = nn.BCEWithLogitsLoss()
 
-    def forward(self, y_cls_pred, y_cls_true, y_seg_pred, y_seg_true, attention_map):
+    def forward(self, y_cls_pred, y_cls_true, y_seg_pred, y_seg_true, attention_logits):
         loss_cls = self.cls_criterion(y_cls_pred, y_cls_true)
 
         y_seg_target = F.interpolate(
@@ -112,12 +112,13 @@ class MultiTaskLoss(nn.Module):
 
         attention_target = F.interpolate(
             y_seg_target,
-            size=attention_map.shape[2:],
+            size=attention_logits.shape[2:],
             mode='bilinear',
             align_corners=True
         )
-        attention_loss_bce = self.attn_criterion(attention_map, attention_target)
+        attention_loss_bce = self.attn_criterion(attention_logits, attention_target)
 
+        attention_map = torch.sigmoid(attention_logits)
         attn_intersection = (attention_map * attention_target).sum(dim=(1, 2, 3))
         attn_union = attention_map.sum(dim=(1, 2, 3)) + attention_target.sum(dim=(1, 2, 3))
         attn_dice = 1.0 - (2.0 * attn_intersection + 1e-8) / (attn_union + 1e-8)
@@ -151,7 +152,7 @@ def visualize_predictions(model, loader, device, out_dir='visuals', n_samples=16
             images = images.to(device)
             targets_seg = targets_seg.to(device)
 
-            logits, y_seg, attention_map = model(images)
+            logits, y_seg, attention_logits, attention_map = model(images)
             probs = torch.sigmoid(y_seg)
             preds_mask = (probs > threshold).float()
 

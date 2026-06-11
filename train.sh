@@ -4,7 +4,6 @@
 
 #SBATCH -p short-complex
 
-#SBATCH -w cluster-node9
 #SBATCH --gpus=1
 #SBATCH --mem=64G
 #SBATCH -c 16
@@ -20,4 +19,4 @@ cd $HOME/MAAL
 
 export CUDA_LAUNCH_BLOCKING=1
 
-python Attention.py
+python CAM_head.py

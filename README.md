@@ -8,12 +8,11 @@ This repository contains code, notebooks and utilities for training and evaluati
 
 Repository structure
 -
-- `MAAL.py` - Main training / experiment script for the MAAL model.
-- `Attention.py` - Attention mechanism implementations and helpers.
-- `common.py` - Shared utilities and helper functions used across scripts.
-- `prepare_dataset.py` - Scripts to prepare and preprocess the dataset used by experiments.
-- `Colab_Run.ipynb` - Notebook with an example Colab-compatible run.
-- `V2_multi_task_fissuras.ipynb` - Notebook for multi-task experiments and analysis.
+- `src/models/` - Model definitions and training scripts: `maal.py`, `attention.py`, and `cam_head.py`.
+- `src/utils/common.py` - Shared utilities and helper functions used across scripts.
+- `src/data/prepare_dataset.py` - Scripts to prepare and preprocess the dataset used by experiments.
+- `notebooks/colab_run.ipynb` - Notebook with an example Colab-compatible run.
+- `notebooks/v2_multi_task_fissuras.ipynb` - Notebook for multi-task experiments and analysis.
 
 Requirements
 -
@@ -36,25 +35,25 @@ Quick start
 1. Prepare the data:
 
 ```bash
-python prepare_dataset.py
+python src/data/prepare_dataset.py
 ```
 
 2. Run training / experiments (example):
 
 ```bash
-python MAAL.py --config configs/your_config.yaml
+python src/models/maal.py --config configs/your_config.yaml
 ```
 
 3. Open and run the notebooks for exploratory experiments:
 
-- Use `Colab_Run.ipynb` to run in Google Colab.
-- Use `V2_multi_task_fissuras.ipynb` for multi-task experiments and visualization.
+- Use `notebooks/colab_run.ipynb` to run in Google Colab.
+- Use `notebooks/v2_multi_task_fissuras.ipynb` for multi-task experiments and visualization.
 
 Notes
 -
 - If you maintain a `requirements.txt`, add it to the repo so others can reproduce your environment.
 - Adjust configuration flags or add a `configs/` folder for reproducible experiment settings.
-- `prepare_dataset.py` includes dataset-specific preprocessing — review it before running if you have local data organization differences.
+- `src/data/prepare_dataset.py` includes dataset-specific preprocessing — review it before running if you have local data organization differences.
 
 Contact
 -

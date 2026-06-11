@@ -128,10 +128,10 @@ class MultiTaskLoss(nn.Module):
         total_loss = (self.w_cls * loss_cls) + (self.w_seg * loss_seg) + (self.w_attn * loss_attention)
 
         return total_loss, {
-            'cls': loss_cls,
-            'seg': loss_seg,
-            'attention_bce': attention_loss_bce,
-            'attention_dice': attn_dice
+            'cls': loss_cls.detach(),
+            'seg': loss_seg.detach(),
+            'attention_bce': attention_loss_bce.detach(),
+            'attention_dice': attn_dice.detach()
         }
 
 

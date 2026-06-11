@@ -34,7 +34,7 @@ VALID_IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png'}
 MASK_BINARY_THRESHOLD = 0.5
 USE_AUTOCAST = True  # Disabled - causes issues on some systems
 USE_COMPILE = False  # Disabled - optional optimization
-ALIGNMENT_WEIGHT = 0.5
+ALIGNMENT_WEIGHT = 0.05
 EPSILON = 1e-8
 
 
@@ -220,12 +220,35 @@ def calculate_iou(pred_mask: torch.Tensor, true_mask: torch.Tensor, threshold: f
     return iou.mean()
 
 
-def train_one_epoch(model, loader, optimizer, criterion, device, scaler):
+def calculate_dice(pred_mask: torch.Tensor, true_mask: torch.Tensor, threshold: float = 0.5, from_logits: bool = False) -> torch.Tensor:
+    pred_prob = torch.sigmoid(pred_mask) if from_logits else pred_mask
+    pred_bin = (pred_prob > threshold).float()
+    intersection = (pred_bin * true_mask).sum(dim=(1, 2, 3))
+    volume = pred_bin.sum(dim=(1, 2, 3)) + true_mask.sum(dim=(1, 2, 3))
+    dice = (2.0 * intersection + EPSILON) / (volume + EPSILON)
+    return dice.mean()
+
+
+def calculate_binary_iou(pred_bin: torch.Tensor, true_mask: torch.Tensor) -> torch.Tensor:
+    intersection = (pred_bin * true_mask).sum(dim=(1, 2, 3))
+    union = pred_bin.sum(dim=(1, 2, 3)) + true_mask.sum(dim=(1, 2, 3)) - intersection
+    iou = (intersection + EPSILON) / (union + EPSILON)
+    return iou.mean()
+
+
+def train_one_epoch(model, loader, optimizer, criterion, device, scaler, epoch=0):
     model.train()
+    if hasattr(criterion, 'set_epoch'):
+        criterion.set_epoch(epoch)
+    else:
+        criterion._epoch = epoch  # For sanity check printing in first epoch
+        criterion.batch_count = 0  # Reset batch count for sanity check
     running_loss = 0.0
     all_preds_cls = []
     all_targets_cls = []
     total_iou = 0.0
+    loss_components = {"cls": 0.0, "seg": 0.0, "align_bce": 0.0, "align_dice": 0.0, "align": 0.0}
+    num_batches = 0
 
     pbar = tqdm(loader, desc="Training", leave=False)
     for images, targets_cls, targets_seg in pbar:
@@ -235,12 +258,12 @@ def train_one_epoch(model, loader, optimizer, criterion, device, scaler):
 
         optimizer.zero_grad()
         with torch.autocast(enabled=USE_AUTOCAST, device_type='cuda' if device == 'cuda' else 'cpu'):
-            y_cls, y_seg, alignment_logits, alignment_map = model(images)
-            loss, _ = criterion(y_cls, targets_cls, y_seg, targets_seg, alignment_logits)
+            y_cls, y_seg, cam = model(images)
+            loss, loss_dict = criterion(y_cls, targets_cls, y_seg, targets_seg, cam)
 
         if not torch.isfinite(loss):
             print("WARNING: non-finite loss detected. Skipping batch.")
-            print(f"  loss={loss}, shapes: images={tuple(images.shape)}, y_cls={tuple(y_cls.shape)}, y_seg={tuple(y_seg.shape)}, alignment_map={tuple(alignment_map.shape)}")
+            print(f"  loss={loss}, shapes: images={tuple(images.shape)}, y_cls={tuple(y_cls.shape)}, y_seg={tuple(y_seg.shape)}, cam={tuple(cam.shape)}")
             continue
 
         if USE_AUTOCAST:
@@ -252,21 +275,43 @@ def train_one_epoch(model, loader, optimizer, criterion, device, scaler):
             optimizer.step()
 
         running_loss += loss.item()
+        for key in loss_components:
+            loss_components[key] += loss_dict[key].item()
+        num_batches += 1
+
         preds_cls = torch.argmax(y_cls, dim=1)
         all_preds_cls.extend(preds_cls.cpu().numpy())
         all_targets_cls.extend(targets_cls.cpu().numpy())
         total_iou += calculate_iou(y_seg, targets_seg).item()
         pbar.set_postfix({'loss': loss.item()})
 
+    # Average loss components
+    for key in loss_components:
+        loss_components[key] /= num_batches
+
+    # Log loss components (all epochs)
+    print(f"Train Loss Components: cls={loss_components['cls']:.4f}, seg={loss_components['seg']:.4f}, "
+          f"align_bce={loss_components['align_bce']:.4f}, align_dice={loss_components['align_dice']:.4f}, "
+          f"align={loss_components['align']:.4f}")
+
     return running_loss / len(loader), accuracy_score(all_targets_cls, all_preds_cls), total_iou / len(loader)
 
 
-def validate_one_epoch(model, loader, criterion, device):
+def validate_one_epoch(model, loader, criterion, device, epoch=0):
     model.eval()
+    if hasattr(criterion, 'set_epoch'):
+        criterion.set_epoch(epoch)
+    else:
+        criterion._epoch = epoch  # For sanity check printing if needed
     running_loss = 0.0
     all_preds_cls = []
     all_targets_cls = []
     total_iou = 0.0
+    total_dice = 0.0
+    total_cam_iou = 0.0
+    total_cam_dice = 0.0
+    loss_components = {"cls": 0.0, "seg": 0.0, "align_bce": 0.0, "align_dice": 0.0, "align": 0.0}
+    num_batches = 0
 
     with torch.no_grad():
         for images, targets_cls, targets_seg in tqdm(loader, desc="Validating", leave=False):
@@ -275,16 +320,44 @@ def validate_one_epoch(model, loader, criterion, device):
             targets_seg = targets_seg.to(device)
 
             with torch.autocast(enabled=USE_AUTOCAST, device_type=device):
-                y_cls, y_seg, alignment_logits, alignment_map = model(images)
-                loss, _ = criterion(y_cls, targets_cls, y_seg, targets_seg, alignment_logits)
+                y_cls, y_seg, cam = model(images)
+                loss, loss_dict = criterion(y_cls, targets_cls, y_seg, targets_seg, cam)
 
             running_loss += loss.item()
+            for key in loss_components:
+                loss_components[key] += loss_dict[key].item()
+            num_batches += 1
+
             preds_cls = torch.argmax(y_cls, dim=1)
             all_preds_cls.extend(preds_cls.cpu().numpy())
             all_targets_cls.extend(targets_cls.cpu().numpy())
             total_iou += calculate_iou(y_seg, targets_seg).item()
+            total_dice += calculate_dice(y_seg, targets_seg, threshold=0.5, from_logits=True).item()
 
-    return running_loss / len(loader), accuracy_score(all_targets_cls, all_preds_cls), f1_score(all_targets_cls, all_preds_cls, average='binary'), total_iou / len(loader)
+            cam_up = F.interpolate(cam, size=targets_seg.shape[2:], mode='bilinear', align_corners=True)
+            cam_prob = torch.sigmoid(cam_up)
+            cam_pred = (cam_prob > 0.5).float()
+            total_cam_iou += calculate_binary_iou(cam_pred, targets_seg).item()
+            total_cam_dice += calculate_dice(cam_pred, targets_seg, threshold=0.5, from_logits=False).item()
+
+    # Average loss components
+    for key in loss_components:
+        loss_components[key] /= num_batches
+
+    # Log loss components (all epochs)
+    print(f"Val Loss Components: cls={loss_components['cls']:.4f}, seg={loss_components['seg']:.4f}, "
+          f"align_bce={loss_components['align_bce']:.4f}, align_dice={loss_components['align_dice']:.4f}, "
+          f"align={loss_components['align']:.4f}")
+
+    return (
+        running_loss / len(loader),
+        accuracy_score(all_targets_cls, all_preds_cls),
+        f1_score(all_targets_cls, all_preds_cls, average='binary'),
+        total_iou / len(loader),
+        total_dice / len(loader),
+        total_cam_iou / len(loader),
+        total_cam_dice / len(loader)
+    )
 
 
 def run_training_pipeline(
@@ -357,12 +430,13 @@ def run_training_pipeline(
             print(f"Resuming fold {fold} from checkpoint '{resume_from}' at epoch {start_epoch}.")
 
         for epoch in range(start_epoch, NUM_EPOCHS):
-            t_loss, t_acc, t_iou = train_one_epoch(model, train_loader, optimizer, criterion, DEVICE, scaler)
-            v_loss, v_acc, v_f1, v_iou = validate_one_epoch(model, val_loader, criterion, DEVICE)
+            t_loss, t_acc, t_iou = train_one_epoch(model, train_loader, optimizer, criterion, DEVICE, scaler, epoch=epoch)
+            v_loss, v_acc, v_f1, v_iou, v_dice, v_cam_iou, v_cam_dice = validate_one_epoch(model, val_loader, criterion, DEVICE, epoch=epoch)
 
             print(
                 f"Epoch {epoch+1} | T_Loss: {t_loss:.3f} T_Acc: {t_acc:.3f} T_IoU: {t_iou:.3f} | "
-                f"V_Acc: {v_acc:.3f} V_F1: {v_f1:.3f} V_IoU: {v_iou:.3f}"
+                f"V_Acc: {v_acc:.3f} V_F1: {v_f1:.3f} V_IoU: {v_iou:.3f} V_Dice: {v_dice:.3f} "
+                f"V_CAM_IoU: {v_cam_iou:.3f} V_CAM_Dice: {v_cam_dice:.3f}"
             )
 
             scheduler.step(v_iou)

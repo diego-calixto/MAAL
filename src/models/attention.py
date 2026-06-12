@@ -4,14 +4,13 @@ Combines classification, segmentation, and spatial attention regularization for 
 """
 
 import os
-import cv2
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 
-from src.utils.common import (
+from ..utils.common import (
     IMAGE_SIZE,
     IMAGENET_MEAN,
     IMAGENET_STD,

@@ -206,7 +206,7 @@ def visualize_model_predictions(model, loader, device, num_images=5, output_dir=
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Train MAAL multi-task model with checkpoint support.')
+    parser = argparse.ArgumentParser(description='Train fusion_cam multi-task model with checkpoint support.')
     parser.add_argument('--checkpoint-dir', default='checkpoints', help='Directory to save checkpoint files')
     parser.add_argument('--resume-from', default=None, help='Path to a checkpoint file to resume training from')
     args = parser.parse_args()
@@ -217,7 +217,7 @@ def main():
 
         if len(df) > 0:
             run_training_pipeline(
-                run_name='MAAL',
+                run_name='fusion_cam',
                 model_factory=lambda: MultiTaskNetwork(num_classes_cls=2, fusion_mode='learned_forward'),
                 criterion_factory=lambda: MultiTaskLoss(w_cls=1.0, w_seg=1.0, w_align=ALIGNMENT_WEIGHT),
                 df=df,
@@ -228,7 +228,7 @@ def main():
 
             # After training, log learned fusion weights for each fold if available
             for fold in range(N_SPLITS):
-                best_path = os.path.join(args.checkpoint_dir, 'MAAL', f'fold_{fold}', 'best.pt')
+                best_path = os.path.join(args.checkpoint_dir, 'fusion_cam', f'fold_{fold}', 'best.pt')
                 if os.path.exists(best_path):
                     ckpt = torch.load(best_path, map_location=DEVICE)
                     model = MultiTaskNetwork(num_classes_cls=2, fusion_mode='learned_forward').to(DEVICE)

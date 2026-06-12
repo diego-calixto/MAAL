@@ -19,4 +19,4 @@ cd $HOME/MAAL
 
 export CUDA_LAUNCH_BLOCKING=1
 
-python src/models/cam_head.py
+python src/models/fusion_cam_head.py

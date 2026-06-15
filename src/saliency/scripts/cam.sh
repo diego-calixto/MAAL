@@ -1,0 +1,11 @@
+python -m src.saliency.generate_saliency   \
+--checkpoint checkpoints/cam/fold_0/best.pt   \
+--input-dir processed_dataset_MTL/Positive/images   \
+--output-dir outputs   \
+--model-type cam_head   \
+--method gradcam   \
+--target-layer encoder.layer4[-1].conv3   \
+--target-type soft   \
+--threshold 0.5   \
+--device cpu   \
+--max-images 10

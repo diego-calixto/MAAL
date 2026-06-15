@@ -3,3 +3,6 @@ raw_data/
 *.rar
 .venv*
 *__pycache__/
+outputs/
+checkpoints/
+src/charts/gradcams/

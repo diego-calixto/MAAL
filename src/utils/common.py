@@ -261,7 +261,25 @@ def train_one_epoch(model, loader, optimizer, criterion, device, scaler, epoch=0
 
         optimizer.zero_grad()
         with torch.autocast(enabled=USE_AUTOCAST, device_type='cuda' if device == 'cuda' else 'cpu'):
-            y_cls, y_seg, cam, _saliency_maps = model(images)
+            outputs = model(images)
+            # Support models that return 2 (cls, seg), 3 (cls, seg, cam) or 4 outputs (cls, seg, cam, saliency_maps)
+            if isinstance(outputs, (list, tuple)):
+                if len(outputs) == 4:
+                    y_cls, y_seg, cam, _saliency_maps = outputs
+                elif len(outputs) == 3:
+                    y_cls, y_seg, cam = outputs
+                    _saliency_maps = []
+                else:
+                    y_cls, y_seg = outputs
+                    cam = torch.zeros_like(y_seg)
+                    _saliency_maps = []
+            else:
+                # Unexpected single-tensor output -> treat as segmentation logits
+                y_cls = torch.zeros((images.size(0), 2), device=images.device)
+                y_seg = outputs
+                cam = torch.zeros_like(y_seg)
+                _saliency_maps = []
+
             loss, loss_dict = criterion(y_cls, targets_cls, y_seg, targets_seg, cam)
 
         if not torch.isfinite(loss):
@@ -326,11 +344,23 @@ def validate_one_epoch(model, loader, criterion, device, epoch=0):
 
             with torch.autocast(enabled=USE_AUTOCAST, device_type=device):
                 outputs = model(images)
-                if len(outputs) == 4:
-                    y_cls, y_seg, cam, saliency_maps = outputs
+                if isinstance(outputs, (list, tuple)):
+                    if len(outputs) == 4:
+                        y_cls, y_seg, cam, saliency_maps = outputs
+                    elif len(outputs) == 3:
+                        y_cls, y_seg, cam = outputs
+                        saliency_maps = []
+                    else:
+                        y_cls, y_seg = outputs
+                        cam = torch.zeros_like(y_seg)
+                        saliency_maps = []
                 else:
-                    y_cls, y_seg, cam = outputs
+                    # Unexpected single-tensor output -> treat as segmentation logits
+                    y_cls = torch.zeros((images.size(0), 2), device=images.device)
+                    y_seg = outputs
+                    cam = torch.zeros_like(y_seg)
                     saliency_maps = []
+
                 loss, loss_dict = criterion(y_cls, targets_cls, y_seg, targets_seg, cam)
 
             running_loss += loss.item()

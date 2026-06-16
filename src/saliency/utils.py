@@ -137,7 +137,10 @@ def make_model(model_type: str):
     if model_type == 'cam_head':
         from src.models.cam_head import MultiTaskNetwork
         return MultiTaskNetwork(num_classes_cls=2)
-    raise ValueError(f'Unknown model_type: {model_type}. Available: fusion_cam, attention, cam_head.')
+    if model_type == 'baseline':
+        from src.models.baseline import MultiTaskNetwork
+        return MultiTaskNetwork(num_classes_cls=2)
+    raise ValueError(f'Unknown model_type: {model_type}. Available: fusion_cam, attention, cam_head, baseline.')
 
 
 def load_model_from_checkpoint(checkpoint_path: str, model_type: str, device: str) -> Tuple[torch.nn.Module, dict]:

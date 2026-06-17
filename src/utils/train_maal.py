@@ -236,7 +236,11 @@ def run_maal_training_pipeline(
             model = torch.compile(model)
 
         criterion = criterion_factory().to(DEVICE)
-        optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+        optimizer = torch.optim.AdamW(
+            list(model.parameters()) + list(criterion.parameters()),
+            lr=LEARNING_RATE,
+            weight_decay=WEIGHT_DECAY,
+        )
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=3)
         scaler = torch.cuda.amp.GradScaler(enabled=USE_AUTOCAST)
 

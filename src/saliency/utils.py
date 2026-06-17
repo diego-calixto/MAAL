@@ -140,7 +140,10 @@ def make_model(model_type: str):
     if model_type == 'baseline':
         from src.models.baseline import MultiTaskNetwork
         return MultiTaskNetwork(num_classes_cls=2)
-    raise ValueError(f'Unknown model_type: {model_type}. Available: fusion_cam, attention, cam_head, baseline.')
+    if model_type == 'maal':
+        from src.models.maal import MultiTaskNetwork
+        return MultiTaskNetwork(num_classes_cls=2, fusion_mode='learned_forward')
+    raise ValueError(f'Unknown model_type: {model_type}. Available: fusion_cam, attention, cam_head, baseline, maal.')
 
 
 def load_model_from_checkpoint(checkpoint_path: str, model_type: str, device: str) -> Tuple[torch.nn.Module, dict]:
@@ -153,11 +156,20 @@ def load_model_from_checkpoint(checkpoint_path: str, model_type: str, device: st
     try:
         model.load_state_dict(checkpoint['model_state'])
     except RuntimeError as err:
-        if 'fusion_conv.weight' in str(err) and 'fusion_weights' in checkpoint and hasattr(model, 'fusion_conv'):
+        err_msg = str(err)
+        if 'fusion_conv.weight' in err_msg and 'fusion_weights' in checkpoint and hasattr(model, 'fusion_conv'):
             model.load_state_dict({k: v for k, v in checkpoint['model_state'].items() if k != 'fusion_conv.weight'}, strict=False)
             model.fusion_conv.weight.data.copy_(checkpoint['fusion_weights'].to(device))
         else:
-            raise
+            try:
+                model.load_state_dict(checkpoint['model_state'], strict=False)
+                warning_msg = (
+                    f"Loaded checkpoint for model_type='{model_type}' with non-strict state_dict. "
+                    f"Some layers may be missing or randomly initialized: {err_msg}"
+                )
+                print(f"WARNING: {warning_msg}")
+            except RuntimeError:
+                raise
 
     if hasattr(model, 'fusion_conv') and 'fusion_weights' in checkpoint:
         try:

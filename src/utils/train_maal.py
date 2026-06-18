@@ -12,7 +12,7 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 from sklearn.model_selection import GroupKFold
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import accuracy_score, f1_score
 from tqdm import tqdm
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
@@ -35,6 +35,7 @@ from src.utils.common import (
     CrackDataset,
     prepare_dataframe,
     calculate_iou,
+    calculate_dice,
     load_checkpoint,
     save_checkpoint,
 )
@@ -139,6 +140,7 @@ def validate_one_epoch_maal(model, loader, criterion, device, epoch=0):
     all_preds_cls = []
     all_targets_cls = []
     total_iou = 0.0
+    total_dice = 0.0
     loss_components = {"cls": 0.0, "seg": 0.0, "align_bce": 0.0, "align_dice": 0.0, "align_maal": 0.0}
     alpha_weights_sum = [0.0] * 4
     num_batches = 0
@@ -170,6 +172,7 @@ def validate_one_epoch_maal(model, loader, criterion, device, epoch=0):
             all_preds_cls.extend(preds_cls.cpu().numpy())
             all_targets_cls.extend(targets_cls.cpu().numpy())
             total_iou += calculate_iou(y_seg, targets_seg).item()
+            total_dice += calculate_dice(y_seg, targets_seg, threshold=0.5, from_logits=True).item()
 
     # Average loss components
     for key in loss_components:
@@ -180,9 +183,11 @@ def validate_one_epoch_maal(model, loader, criterion, device, epoch=0):
 
     val_loss /= len(loader)
     val_acc = accuracy_score(all_targets_cls, all_preds_cls)
+    val_f1 = f1_score(all_targets_cls, all_preds_cls, average='binary')
     val_iou = total_iou / len(loader)
+    val_dice = total_dice / len(loader)
 
-    return val_loss, val_acc, val_iou, loss_components, avg_alphas
+    return val_loss, val_acc, val_f1, val_iou, val_dice, loss_components, avg_alphas
 
 
 def run_maal_training_pipeline(
@@ -245,6 +250,7 @@ def run_maal_training_pipeline(
         scaler = torch.cuda.amp.GradScaler(enabled=USE_AUTOCAST)
 
         best_iou = 0.0
+        best_f1 = 0.0
         es_patience = 6
         es_wait = 0
         start_epoch = 0
@@ -256,6 +262,7 @@ def run_maal_training_pipeline(
                 criterion.load_state_dict(checkpoint['criterion_state'])
             start_epoch = checkpoint.get('epoch', -1) + 1
             best_iou = checkpoint.get('best_iou', best_iou)
+            best_f1 = checkpoint.get('best_f1', best_f1)
             es_wait = checkpoint.get('es_wait', es_wait)
             print(f"Resuming fold {fold} from checkpoint '{resume_from}' at epoch {start_epoch}.")
 
@@ -264,13 +271,13 @@ def run_maal_training_pipeline(
                 model, train_loader, optimizer, criterion, DEVICE, scaler, epoch=epoch
             )
             
-            v_loss, v_acc, v_iou, v_loss_dict, v_alphas = validate_one_epoch_maal(
+            v_loss, v_acc, v_f1, v_iou, v_dice, v_loss_dict, v_alphas = validate_one_epoch_maal(
                 model, val_loader, criterion, DEVICE, epoch=epoch
             )
 
             print(
                 f"Epoch {epoch+1}/{NUM_EPOCHS} | T_Loss: {t_loss:.3f} T_Acc: {t_acc:.3f} T_IoU: {t_iou:.3f} | "
-                f"V_Loss: {v_loss:.3f} V_Acc: {v_acc:.3f} V_IoU: {v_iou:.3f}"
+                f"V_Loss: {v_loss:.3f} V_Acc: {v_acc:.3f} V_F1: {v_f1:.3f} V_IoU: {v_iou:.3f} V_Dice: {v_dice:.3f}"
             )
             print(
                 f"    Val Alphas: S1={v_alphas[0]:.4f}, S2={v_alphas[1]:.4f}, "
@@ -282,6 +289,7 @@ def run_maal_training_pipeline(
             is_best = v_iou > best_iou
             if is_best:
                 best_iou = v_iou
+                best_f1 = max(best_f1, v_f1)
                 es_wait = 0
             else:
                 es_wait += 1
@@ -295,6 +303,7 @@ def run_maal_training_pipeline(
                 'scaler_state': scaler.state_dict(),
                 'scheduler_state': scheduler.state_dict(),
                 'best_iou': best_iou,
+                'best_f1': best_f1,
                 'es_wait': es_wait,
             }
 

@@ -20,8 +20,8 @@ cd $HOME/MAAL
 
 export CUDA_LAUNCH_BLOCKING=1
 
-echo "star time: $date"
+echo "start time: $(date)"
 
 python -m src.models.maal
 
-echo "finish time: $date"
+echo "finish time: $(date)"

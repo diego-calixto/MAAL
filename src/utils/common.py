@@ -14,7 +14,7 @@ except ImportError:
     ResNet50_Weights = None
 
 from sklearn.model_selection import GroupKFold
-from sklearn.metrics import f1_score, accuracy_score
+from sklearn.metrics import f1_score, accuracy_score, precision_score, recall_score
 from tqdm import tqdm
 
 # Shared constants for both model experiments
@@ -237,6 +237,98 @@ def calculate_binary_iou(pred_bin: torch.Tensor, true_mask: torch.Tensor) -> tor
     union = pred_bin.sum(dim=(1, 2, 3)) + true_mask.sum(dim=(1, 2, 3)) - intersection
     iou = (intersection + EPSILON) / (union + EPSILON)
     return iou.mean()
+
+
+def calculate_pixel_accuracy(pred_mask: torch.Tensor, true_mask: torch.Tensor, threshold: float = 0.5) -> torch.Tensor:
+    pred_bin = (torch.sigmoid(pred_mask) > threshold).float()
+    correct = (pred_bin == true_mask).float()
+    return correct.mean()
+
+
+def calculate_pointing_game(saliency_map: torch.Tensor, true_mask: torch.Tensor) -> float:
+    """
+    Calculates Pointing Game hit rate.
+    Returns the ratio of hits (where the max pixel in saliency_map falls inside true_mask == 1).
+    """
+    B = saliency_map.size(0)
+    hits = 0.0
+    for i in range(B):
+        sal = saliency_map[i, 0]
+        mask = true_mask[i, 0]
+        
+        # Avoid empty mask issues if checking
+        if mask.max() == 0:
+            continue # no object to point to
+            
+        max_idx = torch.argmax(sal).item()
+        H, W = sal.shape
+        y = max_idx // W
+        x = max_idx % W
+        
+        if mask[y, x] > 0.5:
+            hits += 1.0
+            
+    # Compute over instances that actually have an object
+    num_objects = sum([1 for i in range(B) if true_mask[i, 0].max() > 0])
+    return hits / max(1, num_objects)
+
+
+def calculate_insertion_deletion_score(model, image: torch.Tensor, saliency_map: torch.Tensor, target_cls: int, steps: int = 10, mode: str = 'deletion'):
+    """
+    Standalone function to compute Deletion or Insertion score for a single image.
+    image: [1, 3, H, W]
+    saliency_map: [1, 1, H, W] or [H, W]
+    mode: 'deletion' or 'insertion'
+    """
+    model.eval()
+    if saliency_map.dim() == 4:
+        saliency_map = saliency_map[0, 0]
+    elif saliency_map.dim() == 3:
+        saliency_map = saliency_map[0]
+        
+    with torch.no_grad():
+        out_cls = model(image)
+        if isinstance(out_cls, (list, tuple)):
+            out_cls = out_cls[0]
+        probs = torch.softmax(out_cls, dim=1)
+        initial_conf = probs[0, target_cls].item()
+
+    flat_saliency = saliency_map.flatten()
+    sorted_indices = torch.argsort(flat_saliency, descending=True)
+    num_pixels = flat_saliency.size(0)
+    pixels_per_step = num_pixels // steps
+    
+    scores = [initial_conf]
+    
+    if mode == 'deletion':
+        perturbed_img = image.clone()
+        fill_value = 0.0 # Or image mean
+    elif mode == 'insertion':
+        perturbed_img = torch.zeros_like(image)
+        
+    for step in range(1, steps + 1):
+        idx_start = (step - 1) * pixels_per_step
+        idx_end = step * pixels_per_step if step < steps else num_pixels
+        
+        current_indices = sorted_indices[idx_start:idx_end]
+        H, W = saliency_map.shape
+        y = current_indices // W
+        x = current_indices % W
+        
+        if mode == 'deletion':
+            perturbed_img[0, :, y, x] = fill_value
+        elif mode == 'insertion':
+            perturbed_img[0, :, y, x] = image[0, :, y, x]
+            
+        with torch.no_grad():
+            out_cls = model(perturbed_img)
+            if isinstance(out_cls, (list, tuple)):
+                out_cls = out_cls[0]
+            probs = torch.softmax(out_cls, dim=1)
+            scores.append(probs[0, target_cls].item())
+            
+    auc = np.trapz(scores, dx=1.0/steps)
+    return auc, scores
 
 
 def train_one_epoch(model, loader, optimizer, criterion, device, scaler, epoch=0):

@@ -34,4 +34,10 @@ python -m src.models.maal_expE --checkpoint-dir checkpoints/expE
 echo "==================== RUNNING EXP F ===================="
 python -m src.models.maal_expF --checkpoint-dir checkpoints/expF
 
+echo "==================== RUNNING EXP G ===================="
+python -m src.models.maal_expG --checkpoint-dir checkpoints/expG
+
+echo "==================== RUNNING EXP H ===================="
+python -m src.models.maal_expH --checkpoint-dir checkpoints/expH
+
 echo "Finish time: $(date)"

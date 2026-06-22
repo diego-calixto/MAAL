@@ -49,27 +49,35 @@ from src.saliency.methods import GradCAM
 EXPERIMENT_CONFIGS = {
     "baseline": {
         "model_type": "baseline",
-        "checkpoint_pattern": "baseline/checkpoints/fold_{fold}/best.pt"
+        "checkpoint_pattern": "checkpoints/baseline/fold_{fold}/best.pt"
     },
     "Attention": {
         "model_type": "attention",
-        "checkpoint_pattern": "Attention/checkpoints/fold_{fold}/best.pt"
+        "checkpoint_pattern": "checkpoints/attention/fold_{fold}/best.pt"
     },
     "CAM": {
         "model_type": "cam_head",
-        "checkpoint_pattern": "CAM/checkpoints/fold_{fold}/best.pt"
+        "checkpoint_pattern": "checkpoints/cam/fold_{fold}/best.pt"
     },
     "Fusion_CAM": {
         "model_type": "fusion_cam",
-        "checkpoint_pattern": "Fusion_CAM/checkpoints/fold_{fold}/best.pt"
+        "checkpoint_pattern": "checkpoints/fusion_cam/fold_{fold}/best.pt"
     },
     "MAAL": {
         "model_type": "maal",
-        "checkpoint_pattern": "MAAL/checkpoints/fold_{fold}/best.pt"
+        "checkpoint_pattern": "checkpoints/maal/fold_{fold}/best.pt"
     },
     "MAAL_V2": {
-        "model_type": "maal",
-        "checkpoint_pattern": "MAAL_V2/resultados_cluster/checkpoints/fold_{fold}/best.pt"
+        "model_type": "maal_v2",
+        "checkpoint_pattern": "checkpoints/maal_v2/fold_{fold}/best.pt"
+    },
+    "MAAL_V3": {
+        "model_type": "maal_v3",
+        "checkpoint_pattern": "checkpoints/maal_v3/fold_{fold}/best.pt"
+    },
+    "MAAL_V4": {
+        "model_type": "maal_v4",
+        "checkpoint_pattern": "checkpoints/maal_v4/fold_{fold}/best.pt"
     }
 }
 
@@ -431,16 +439,25 @@ def main():
         clean_cols = [c for c in df_summary.columns if not c.endswith("_mean")]
         df_summary_clean = df_summary[clean_cols]
         
-        # Write CSV outputs
+        # Write CSV and XLSX outputs
         os.makedirs(resultados_path, exist_ok=True)
         detailed_csv_path = resultados_path / "evaluated_metrics_detailed.csv"
         summary_csv_path = resultados_path / "evaluated_metrics_summary.csv"
+        detailed_xlsx_path = resultados_path / "evaluated_metrics_detailed.xlsx"
+        summary_xlsx_path = resultados_path / "evaluated_metrics_summary.xlsx"
         
         df_detailed.to_csv(detailed_csv_path, index=False)
         df_summary_clean.to_csv(summary_csv_path, index=False)
         
-        print(f"\nSaved detailed fold-by-fold results to: {detailed_csv_path}")
-        print(f"Saved aggregated summaries to: {summary_csv_path}")
+        try:
+            df_detailed.to_excel(detailed_xlsx_path, index=False)
+            df_summary_clean.to_excel(summary_xlsx_path, index=False)
+            print(f"\nSaved detailed fold-by-fold results to: {detailed_csv_path} and {detailed_xlsx_path}")
+            print(f"Saved aggregated summaries to: {summary_csv_path} and {summary_xlsx_path}")
+        except ModuleNotFoundError:
+            print(f"\nSaved detailed fold-by-fold results to: {detailed_csv_path}")
+            print(f"Saved aggregated summaries to: {summary_csv_path}")
+            print("\n[WARNING] 'openpyxl' module not found. Could not save .xlsx files. Run 'pip install openpyxl' to fix this.")
         
         # Display as a markdown table
         print("\n=== AGGREGATED METRICS TABLE ===")

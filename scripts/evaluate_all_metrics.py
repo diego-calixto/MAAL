@@ -49,35 +49,35 @@ from src.saliency.methods import GradCAM
 EXPERIMENT_CONFIGS = {
     "baseline": {
         "model_type": "baseline",
-        "checkpoint_pattern": "checkpoints/baseline/fold_{fold}/best.pt"
+        "checkpoint_pattern": "resultados_cluster/baseline/fold_{fold}/best.pt"
     },
     "Attention": {
         "model_type": "attention",
-        "checkpoint_pattern": "checkpoints/attention/fold_{fold}/best.pt"
+        "checkpoint_pattern": "resultados_cluster/attention/fold_{fold}/best.pt"
     },
     "CAM": {
         "model_type": "cam_head",
-        "checkpoint_pattern": "checkpoints/cam/fold_{fold}/best.pt"
+        "checkpoint_pattern": "resultados_cluster/cam/fold_{fold}/best.pt"
     },
     "Fusion_CAM": {
         "model_type": "fusion_cam",
-        "checkpoint_pattern": "checkpoints/fusion_cam/fold_{fold}/best.pt"
+        "checkpoint_pattern": "resultados_cluster/fusion_cam/fold_{fold}/best.pt"
     },
     "MAAL": {
         "model_type": "maal",
-        "checkpoint_pattern": "checkpoints/maal/fold_{fold}/best.pt"
+        "checkpoint_pattern": "resultados_cluster/maal/fold_{fold}/best.pt"
     },
     "MAAL_V2": {
         "model_type": "maal_v2",
-        "checkpoint_pattern": "checkpoints/maal_v2/fold_{fold}/best.pt"
+        "checkpoint_pattern": "resultados_cluster/maal_v2/fold_{fold}/best.pt"
     },
     "MAAL_V3": {
         "model_type": "maal_v3",
-        "checkpoint_pattern": "checkpoints/maal_v3/fold_{fold}/best.pt"
+        "checkpoint_pattern": "resultados_cluster/maal_v3/fold_{fold}/best.pt"
     },
     "MAAL_V4": {
         "model_type": "maal_v4",
-        "checkpoint_pattern": "checkpoints/maal_v4/fold_{fold}/best.pt"
+        "checkpoint_pattern": "resultados_cluster/maal_v4/fold_{fold}/best.pt"
     }
 }
 

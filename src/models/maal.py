@@ -54,28 +54,51 @@ class MultiTaskNetwork(nn.Module):
         features = self.encoder(x)
         f_final = features[-1]
 
-        x_cls_feat = self.avgpool(f_final)
-        x_cls_flat = torch.flatten(x_cls_feat, 1)
-        y_cls = self.fc(x_cls_flat)
-
+        # 1. GERAR MAPAS DE SALIÊNCIA PRIMEIRO
         saliency_maps = []
         target_size = features[self.saliency_stages[0]].shape[2:]
+        
+        final_saliency_raw = None # Variável para guardar o mapa antes da interpolação
+        
         for idx, stage_idx in enumerate(self.saliency_stages):
             stage_feat = features[stage_idx]
             stage_map = self.saliency_heads[idx](stage_feat)
-            stage_map = F.interpolate(
+            
+            # Capturamos o mapa da última camada com sua resolução original (antes do upsample)
+            # para que ele tenha o exato tamanho espacial de f_final
+            if stage_idx == self.saliency_stages[-1]:
+                final_saliency_raw = stage_map
+                
+            stage_map_up = F.interpolate(
                 stage_map,
                 size=target_size,
                 mode='bilinear',
                 align_corners=True
             )
-            saliency_maps.append(stage_map)
+            saliency_maps.append(stage_map_up)
 
         saliency_stack = torch.cat(saliency_maps, dim=1)
         fused = self.fusion_conv(saliency_stack)
-        y_seg = self.decoder(features)
-        return y_cls, y_seg, fused, saliency_maps
 
+        # 2. MECANISMO DE ATENÇÃO EXPLÍCITO (GATING)
+        # Transformamos o logit do último mapa de saliência em probabilidades [0, 1]
+        attention_weights = torch.sigmoid(final_saliency_raw)
+        
+        # Multiplicação Element-wise (Gating): 
+        # Fundo da imagem (atenção ~ 0) é "apagado". Trincas (atenção ~ 1) são preservadas.
+        # O Pytorch faz o broadcast automático do canal 1 para os 2048 canais de f_final.
+        f_attended = f_final * attention_weights
+
+        # 3. CLASSIFICAÇÃO (Agora guiada e restrita pela atenção)
+        # O AvgPool e a camada FC recebem apenas os pixels que a Saliência (MAAL) permitiu passar
+        x_cls_feat = self.avgpool(f_attended)
+        x_cls_flat = torch.flatten(x_cls_feat, 1)
+        y_cls = self.fc(x_cls_flat)
+
+        # 4. SEGMENTAÇÃO
+        y_seg = self.decoder(features)
+        
+        return y_cls, y_seg, fused, saliency_maps
 
 class MultiTaskLoss(nn.Module):
 

@@ -216,13 +216,19 @@ def run_maal_training_pipeline(
     n_splits=N_SPLITS,
     checkpoint_dir='checkpoints',
     resume_from=None,
+    run_name='maal'
 ):
     """
     Run MAAL training with k-fold cross-validation.
     """
     gkf = GroupKFold(n_splits=n_splits)
     pin_memory = DEVICE == 'cuda'
-    run_checkpoint_dir = os.path.join(checkpoint_dir, 'maal')
+    
+    if run_name:
+        run_checkpoint_dir = os.path.join(checkpoint_dir, run_name)
+    else:
+        run_checkpoint_dir = checkpoint_dir
+        
     os.makedirs(run_checkpoint_dir, exist_ok=True)
 
     print(f"Running MAAL training on: {DEVICE}")

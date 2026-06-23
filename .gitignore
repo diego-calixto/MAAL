@@ -6,3 +6,5 @@ raw_data/
 outputs/
 checkpoints/
 src/charts/gradcams/
+dados/
+merge_dados.py

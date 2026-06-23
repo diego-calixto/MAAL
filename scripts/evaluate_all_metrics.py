@@ -74,6 +74,18 @@ EXPERIMENT_CONFIGS = {
     "MAAL_V4": {
         "model_type": "maal_expH",
         "checkpoint_pattern": "maal_v4/checkpoints/fold_{fold}/best.pt"
+    },
+    "MAAL_V5": {
+        "model_type": "maal_expI",
+        "checkpoint_pattern": "maal_v5/checkpoints/fold_{fold}/best.pt"
+    },
+    "MAAL_V6": {
+        "model_type": "maal_expJ",
+        "checkpoint_pattern": "maal_v6/checkpoints/fold_{fold}/best.pt"
+    },
+    "MAAL_V7": {
+        "model_type": "maal_expK",
+        "checkpoint_pattern": "maal_v7/checkpoints/fold_{fold}/best.pt"
     }
 }
 

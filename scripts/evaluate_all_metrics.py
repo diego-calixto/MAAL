@@ -68,15 +68,15 @@ EXPERIMENT_CONFIGS = {
         "checkpoint_pattern": "maal/checkpoints/fold_{fold}/best.pt"
     },
     "MAAL_V2": {
-        "model_type": "maal_v2",
+        "model_type": "maal",
         "checkpoint_pattern": "maal_v2/checkpoints/fold_{fold}/best.pt"
     },
     "MAAL_V3": {
-        "model_type": "maal_v3",
+        "model_type": "maal_expg",
         "checkpoint_pattern": "maal_v3/checkpoints/fold_{fold}/best.pt"
     },
     "MAAL_V4": {
-        "model_type": "maal_v4",
+        "model_type": "maal_exph",
         "checkpoint_pattern": "maal_v4/checkpoints/fold_{fold}/best.pt"
     }
 }
@@ -236,12 +236,25 @@ def evaluate_checkpoint(
         target_seg_batch = target_seg.unsqueeze(0).to(device)
         target_cls_val = int(target_cls.item())
         
-        # Generate Grad-CAM map
+        # Generate Saliency Map
         try:
-            cam = explainer.generate(image_batch) # 2D numpy [H, W] normalized [0, 1]
-            cam_tensor = torch.from_numpy(cam).unsqueeze(0).unsqueeze(0).to(device) # [1, 1, H, W]
+            outputs = model(image_batch)
+            if len(outputs) >= 3:
+                # Use intrinsic CAM map for MAAL, Fusion_CAM and CAM_head
+                intrinsic_logits = outputs[2] # fused or cam_logits
+                intrinsic_up = torch.nn.functional.interpolate(
+                    intrinsic_logits, 
+                    size=(image_batch.shape[2], image_batch.shape[3]), 
+                    mode='bilinear', 
+                    align_corners=True
+                )
+                cam_tensor = torch.sigmoid(intrinsic_up) # [1, 1, H, W]
+            else:
+                # Fallback to Grad-CAM for baseline and attention
+                cam = explainer.generate(image_batch) # 2D numpy [H, W] normalized [0, 1]
+                cam_tensor = torch.from_numpy(cam).unsqueeze(0).unsqueeze(0).to(device) # [1, 1, H, W]
         except Exception as e:
-            warnings.warn(f"Failed to generate Grad-CAM: {e}")
+            warnings.warn(f"Failed to generate CAM: {e}")
             continue
             
         # Pointing Game (using custom logic to count instances with objects)

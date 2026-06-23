@@ -143,7 +143,13 @@ def make_model(model_type: str):
     if model_type == 'maal':
         from src.models.maal import MultiTaskNetwork
         return MultiTaskNetwork(num_classes_cls=2, fusion_mode='learned_forward')
-    raise ValueError(f'Unknown model_type: {model_type}. Available: fusion_cam, attention, cam_head, baseline, maal.')
+    if model_type == 'maal_expg':
+        from src.models.maal_expG import MultiTaskNetwork
+        return MultiTaskNetwork(num_classes_cls=2, fusion_mode='learned_forward')
+    if model_type == 'maal_exph':
+        from src.models.maal_expH import MultiTaskNetwork
+        return MultiTaskNetwork(num_classes_cls=2, fusion_mode='learned_forward')
+    raise ValueError(f'Unknown model_type: {model_type}. Available: fusion_cam, attention, cam_head, baseline, maal, maal_expg, maal_exph.')
 
 
 def load_model_from_checkpoint(checkpoint_path: str, model_type: str, device: str) -> Tuple[torch.nn.Module, dict]:

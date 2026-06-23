@@ -67,16 +67,12 @@ EXPERIMENT_CONFIGS = {
         "model_type": "maal",
         "checkpoint_pattern": "maal/checkpoints/fold_{fold}/best.pt"
     },
-    "MAAL_V2": {
-        "model_type": "maal",
-        "checkpoint_pattern": "maal_v2/checkpoints/fold_{fold}/best.pt"
-    },
     "MAAL_V3": {
-        "model_type": "maal_expg",
+        "model_type": "maal_expG",
         "checkpoint_pattern": "maal_v3/checkpoints/fold_{fold}/best.pt"
     },
     "MAAL_V4": {
-        "model_type": "maal_exph",
+        "model_type": "maal_expH",
         "checkpoint_pattern": "maal_v4/checkpoints/fold_{fold}/best.pt"
     }
 }

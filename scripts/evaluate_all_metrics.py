@@ -116,8 +116,8 @@ def parse_args():
         help="How to sort the dataset dataframe before cross-validation splitting. Default: none."
     )
     parser.add_argument(
-        "--experiments", nargs="*", default=None,
-        help="Subset of experiments to evaluate. E.g. --experiments baseline MAAL"
+        "experiments", nargs="*", default=None,
+        help="Subset of experiments to evaluate. E.g. baseline MAAL"
     )
     parser.add_argument(
         "--dry-run", action="store_true",
@@ -236,13 +236,21 @@ def evaluate_checkpoint(
     del_aucs = []
     ins_aucs = []
     
+    num_evaluated_xai = 0
+    
     for idx in tqdm(subset_indices, desc="    XAI evaluation", leave=False):
         image, target_cls, target_seg = val_dataset[idx]
+        target_cls_val = int(target_cls.item())
+        
+        # Only evaluate XAI metrics on positive samples (images with cracks)
+        if target_cls_val == 0:
+            continue
+            
+        num_evaluated_xai += 1
         
         # Add batch dim
         image_batch = image.unsqueeze(0).to(device)
         target_seg_batch = target_seg.unsqueeze(0).to(device)
-        target_cls_val = int(target_cls.item())
         
         # Generate Saliency Map
         try:
@@ -292,7 +300,7 @@ def evaluate_checkpoint(
         ins_aucs.append(ins_auc)
         
     point_game_score = hits / max(1, num_pointing_objects)
-    saliency_iou_score = total_sal_iou / len(subset_indices)
+    saliency_iou_score = total_sal_iou / max(1, num_evaluated_xai)
     deletion_auc = np.mean(del_aucs) if del_aucs else 0.0
     insertion_auc = np.mean(ins_aucs) if ins_aucs else 0.0
     

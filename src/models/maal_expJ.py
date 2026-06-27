@@ -132,6 +132,8 @@ class MultiTaskLoss(nn.Module):
         loss_fused_bce = torch.tensor(0.0, device=y_seg_true.device)
         loss_fused_dice = torch.tensor(0.0, device=y_seg_true.device)
         loss_maal = torch.tensor(0.0, device=y_seg_true.device)
+        loss_align_bce_total = torch.tensor(0.0, device=y_seg_true.device)
+        loss_align_dice_total = torch.tensor(0.0, device=y_seg_true.device)
         
         alphas = F.softmax(self.alpha_weights, dim=0)
         
@@ -159,6 +161,8 @@ class MultiTaskLoss(nn.Module):
                 loss_fused_dice = 1.0 - dice_score.mean()
                 
             loss_fused = loss_fused_bce + loss_fused_dice
+            loss_align_bce_total = loss_align_bce_total + loss_fused_bce.detach()
+            loss_align_dice_total = loss_align_dice_total + loss_fused_dice.detach()
             
             # 2. Auxiliary Multi-Scale MAAL Alignment (unconstrained adaptive weighting)
             for l, s_map in enumerate(individual_maps):
@@ -175,6 +179,8 @@ class MultiTaskLoss(nn.Module):
                 
                 loss_align_l = loss_align_l_bce + loss_align_l_dice
                 loss_maal += alphas[l] * loss_align_l
+                loss_align_bce_total = loss_align_bce_total + loss_align_l_bce.detach()
+                loss_align_dice_total = loss_align_dice_total + loss_align_l_dice.detach()
 
         # Total Loss formulation
         total_loss = (self.w_cls * loss_cls) + (self.w_seg * loss_seg) + (self.w_align * (loss_fused + loss_maal))
@@ -187,8 +193,8 @@ class MultiTaskLoss(nn.Module):
         return total_loss, {
             "cls": loss_cls.detach(),
             "seg": loss_seg.detach(),
-            "align_bce": loss_fused_bce.detach(),
-            "align_dice": loss_fused_dice.detach(),
+            "align_bce": loss_align_bce_total.detach(),
+            "align_dice": loss_align_dice_total.detach(),
             "align_maal": (loss_fused + loss_maal).detach(),
             "alphas": alphas.detach()
         }

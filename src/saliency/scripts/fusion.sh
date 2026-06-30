@@ -1,11 +1,11 @@
 python -m src.saliency.generate_saliency   \
---checkpoint checkpoints/fusion_cam/fold_0/best.pt   \
---input-dir processed_dataset_MTL/Positive/images   \
---output-dir outputs   \
---model-type fusion_cam   \
---method gradcam   \
---target-layer encoder.layer4[-1].conv3   \
---target-type soft   \
---threshold 0.5   \
---device cpu   \
---max-images 10
+    --checkpoint checkpoints/fusion_cam/fold_0/best.pt   \
+    --input-dir processed_dataset_MTL/Positive/images   \
+    --output-dir outputs   \
+    --model-type fusion_cam   \
+    --method fusion_cam_head   \
+    --target-layer encoder.layer4[-1].conv3   \
+    --target-type soft   \
+    --threshold 0.5   \
+    --device cpu   \
+    --max-images 1   # Process only 001_1920_1152.jpg

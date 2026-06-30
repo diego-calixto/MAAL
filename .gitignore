@@ -8,3 +8,4 @@ checkpoints/
 src/charts/gradcams/
 dados/
 merge_dados.py
+resultados_cluster/

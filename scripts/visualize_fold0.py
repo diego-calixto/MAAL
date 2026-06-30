@@ -68,6 +68,15 @@ EXPERIMENTS = {
         "checkpoint": ROOT / "resultados_cluster/MAAL_V2/resultados_cluster/checkpoints/fold_0/best.pt",
         "model_type": "maal",
     },
+    "MAAL_G": {
+        "checkpoint": ROOT / "resultados_cluster/maal_v3/checkpoints/fold_0/best.pt",
+        "model_type": "maal_g",
+    },
+    "MAAL_H":
+    {
+        "checkpoint": ROOT / "resultados_cluster/maal_v4/checkpoints/fold_0/best.pt",
+        "model_type": "maal_h",
+    },
 }
 
 # Dataset directories
@@ -103,14 +112,38 @@ def load_gt_mask(stem: str) -> np.ndarray | None:
     return None
 
 
-def get_predicted_mask(model, input_tensor: torch.Tensor, threshold: float = 0.5) -> np.ndarray:
-    """Run inference and return binary predicted mask as float32 [0,1]."""
+def get_predicted_mask(model, input_tensor: torch.Tensor, threshold: float = 0.5) -> tuple:
+    """Run inference and return binary predicted mask and attention map as float32 [0,1]."""
     with torch.no_grad():
         outputs = model(input_tensor)
-    y_seg = outputs[1]  # segmentation logits
+    
+    # Extract segmentation output
+    y_seg = outputs[1] if len(outputs) > 1 else outputs[0]
     prob  = torch.sigmoid(y_seg)                        # [1,1,H,W]
     mask  = (prob > threshold).float()
-    return mask.squeeze().cpu().numpy()                 # [H,W]
+    
+    # Extract intrinsic interpretation map based on model type
+    attn_map = None
+    
+    if len(outputs) == 4:
+        # attention.py: returns (y_cls, y_seg, attention_logits, attention_map)
+        # attention_map is already sigmoid-ed
+        if isinstance(outputs[3], torch.Tensor):
+            attn_map = outputs[3]  # attention_map (already sigmoid-ed)
+        # maal_expG.py: returns (y_cls, y_seg, fused, saliency_maps)
+        # saliency_maps is a list, fused (outputs[2]) needs sigmoid
+        elif isinstance(outputs[3], list):
+            attn_map = torch.sigmoid(outputs[2])  # fused map
+    elif len(outputs) == 3:
+        # cam_head.py: returns (y_cls, y_seg, cam_logits)
+        # cam_logits needs sigmoid
+        if isinstance(outputs[2], torch.Tensor):
+            attn_map = torch.sigmoid(outputs[2])  # cam_logits
+    
+    if attn_map is not None:
+        attn_map = attn_map.squeeze().cpu().numpy()  # [H,W]
+    
+    return mask.squeeze().cpu().numpy(), attn_map       # [H,W], [H,W] or None
 
 
 def compute_gradcam(model, input_tensor: torch.Tensor, device: str,
@@ -128,7 +161,7 @@ def compute_gradcam(model, input_tensor: torch.Tensor, device: str,
     return cam.astype(np.float32)
 
 
-def apply_colormap(gray: np.ndarray, cmap_name: str = "inferno") -> np.ndarray:
+def apply_colormap(gray: np.ndarray, cmap_name: str = "rainbow_r") -> np.ndarray:
     """Convert a [0,1] float map to a colour image (H,W,3) uint8."""
     cmap = plt.get_cmap(cmap_name)
     rgba = cmap(gray)                                # (H,W,4) float
@@ -146,7 +179,7 @@ def blend_overlay(image_rgb: np.ndarray, heatmap_rgb: np.ndarray,
 # ── per-experiment visualisation ─────────────────────────────────────────────
 
 def visualize_experiment(exp_name: str, cfg: dict, image_paths: list[Path],
-                         device: str, threshold: float = 0.5) -> None:
+                         device: str, threshold: float = 0.5, save_heatmap: bool = False) -> None:
     ckpt_path = cfg["checkpoint"]
     model_type = cfg["model_type"]
 
@@ -163,10 +196,14 @@ def visualize_experiment(exp_name: str, cfg: dict, image_paths: list[Path],
     # Load model
     model, _ = load_model_from_checkpoint(str(ckpt_path), model_type, device)
     model.eval()
+    # Prepare heatmap output directory if needed
+    if save_heatmap:
+        heatmap_dir = OUTPUT_DIR / f"{exp_name}_heatmaps"
+        heatmap_dir.mkdir(parents=True, exist_ok=True)
 
     n_imgs = len(image_paths)
-    # Layout: rows = images, cols = [Original, GT Mask, Pred Mask, GradCAM Overlay]
-    COL_LABELS = ["Original", "Ground Truth", "Predicted Mask", "GradCAM"]
+    # Layout: rows = images, cols = [Original, GT Mask, Pred Mask, Attention/GradCAM Overlay]
+    COL_LABELS = ["Original", "Ground Truth", "Predicted Mask", "Attention/GradCAM"]
     n_cols = len(COL_LABELS)
 
     fig, axes = plt.subplots(n_imgs, n_cols,
@@ -191,8 +228,8 @@ def visualize_experiment(exp_name: str, cfg: dict, image_paths: list[Path],
         if gt_mask is None:
             gt_mask = np.zeros(original_rgb.shape[:2], dtype=np.float32)
 
-        # ── Predicted mask ───────────────────────────────────────────────
-        pred_mask_small = get_predicted_mask(model, input_tensor, threshold)
+        # ── Predicted mask and intrinsic attention ───────────────────────────────
+        pred_mask_small, attn_map_small = get_predicted_mask(model, input_tensor, threshold)
         # Resize pred from model resolution → original resolution
         pred_mask = cv2.resize(
             pred_mask_small.astype(np.float32),
@@ -200,16 +237,45 @@ def visualize_experiment(exp_name: str, cfg: dict, image_paths: list[Path],
             interpolation=cv2.INTER_NEAREST,
         )
 
-        # ── GradCAM ──────────────────────────────────────────────────────
-        try:
-            cam_small = compute_gradcam(model, input_tensor, device, TARGET_LAYER_NAME)
-            cam = resize_map(cam_small, original_rgb.shape[:2])  # → original resolution
-        except Exception as exc:
-            print(f"    [WARN] GradCAM failed for {stem}: {exc}")
-            cam = np.zeros(original_rgb.shape[:2], dtype=np.float32)
+        # ── Intrinsic attention map or GradCAM ────────────────────────────────────
+        if attn_map_small is not None:
+            # Use intrinsic attention map from model
+            attn_map = cv2.resize(
+            attn_map_small.astype(np.float32),
+            (original_rgb.shape[1], original_rgb.shape[0]),
+            interpolation=cv2.INTER_LINEAR,
+        )
+        cam_label = "Intrinsic Attention"
+        if save_heatmap:
+            # Save raw heatmap (grayscale)
+            raw_path = heatmap_dir / f"{stem}_heatmap_raw.png"
+            cv2.imwrite(str(raw_path), (attn_map * 255).astype(np.uint8))
+            # Save colored heatmap
+            colored = apply_colormap(attn_map, "rainbow_r")
+            color_path = heatmap_dir / f"{stem}_heatmap_colored.png"
+            cv2.imwrite(str(color_path), colored)
+        else:
+            # Fall back to GradCAM for models without intrinsic attention
+            try:
+                cam_small = compute_gradcam(model, input_tensor, device, TARGET_LAYER_NAME)
+                attn_map = resize_map(cam_small, original_rgb.shape[:2])  # → original resolution
+                cam_label = "GradCAM"
+                if save_heatmap:
+                    raw_path = heatmap_dir / f"{stem}_gradcam_raw.png"
+                    cv2.imwrite(str(raw_path), (attn_map * 255).astype(np.uint8))
+                    colored = apply_colormap(attn_map, "rainbow_r")
+                    color_path = heatmap_dir / f"{stem}_gradcam_colored.png"
+                    cv2.imwrite(str(color_path), colored)
+            except Exception as exc:
+                print(f"    [WARN] GradCAM failed for {stem}: {exc}")
+                attn_map = np.zeros(original_rgb.shape[:2], dtype=np.float32)
+                cam_label = "GradCAM (failed)"
 
-        cam_color   = apply_colormap(cam, "inferno")
+        cam_color   = apply_colormap(attn_map, "rainbow_r")
         cam_overlay = blend_overlay(original_rgb, cam_color, alpha=0.45)
+        if save_heatmap:
+            overlay_path = heatmap_dir / f"{stem}_overlay.png"
+            cv2.imwrite(str(overlay_path), cam_overlay)
 
         # ── Resize GT mask to original image size ─────────────────────────
         if gt_mask.shape != original_rgb.shape[:2]:
@@ -262,6 +328,14 @@ def parse_args():
         help="Sigmoid threshold for binarising the segmentation output (default: 0.5).",
     )
     parser.add_argument(
+        "--save-heatmap", action="store_true",
+        help="Save the saliency/attention heatmap as a separate image per input.",
+    )
+    parser.add_argument(
+        "--image-path", type=str, default=None,
+        help="Path to a specific image file to process (overrides max-images and prefix).",
+    )
+    parser.add_argument(
         "--experiments", nargs="*", default=None,
         help="Subset of experiments to run (default: all). E.g. --experiments baseline Attention",
     )
@@ -282,7 +356,15 @@ def main():
     all_images = sorted(IMAGES_DIR.glob("*.jpg")) + sorted(IMAGES_DIR.glob("*.png"))
     if args.image_prefix:
         all_images = [p for p in all_images if p.stem.startswith(args.image_prefix)]
-    sample_images = all_images[: args.max_images]
+    # If a specific image path is provided, use only that image
+    if args.image_path:
+        specific_path = Path(args.image_path)
+        if not specific_path.exists():
+            print(f"[ERROR] Specified image not found: {specific_path}")
+            sys.exit(1)
+        sample_images = [specific_path]
+    else:
+        sample_images = all_images[: args.max_images]
 
     if not sample_images:
         print(f"[ERROR] No images found in {IMAGES_DIR} matching prefix '{args.image_prefix}'.")
@@ -304,6 +386,7 @@ def main():
             image_paths=sample_images,
             device=device,
             threshold=args.threshold,
+            save_heatmap=args.save_heatmap,
         )
 
     print(f"\nAll done. Figures saved in: {OUTPUT_DIR}")

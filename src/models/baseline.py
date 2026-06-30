@@ -133,7 +133,7 @@ def visualize_model_predictions(model, loader, device, num_images=5, output_dir=
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Train MAAL multi-task model with checkpoint support.')
+    parser = argparse.ArgumentParser(description='Train baseline multi-task model with checkpoint support.')
     parser.add_argument('--checkpoint-dir', default='checkpoints', help='Directory to save checkpoint files')
     parser.add_argument('--resume-from', default=None, help='Path to a checkpoint file to resume training from')
     args = parser.parse_args()
@@ -144,7 +144,7 @@ def main():
 
         if len(df) > 0:
             run_training_pipeline(
-                run_name='MAAL',
+                run_name='baseline_MTL',
                 model_factory=lambda: MultiTaskNetwork(num_classes_cls=2),
                 criterion_factory=lambda: MultiTaskLoss(w_cls=1.0, w_seg=1.0, w_align=0.0),
                 df=df,

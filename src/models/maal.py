@@ -1,18 +1,12 @@
 import argparse
 import os
-import sys
-from pathlib import Path
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import matplotlib.pyplot as plt
 
-ROOT_DIR = Path(__file__).resolve().parents[1].parent
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
-
-from src.utils.common import (
+from ..utils.common import (
     IMAGE_SIZE,
     IMAGENET_MEAN,
     IMAGENET_STD,
@@ -23,9 +17,10 @@ from src.utils.common import (
     ALIGNMENT_WEIGHT,
     SharedEncoder,
     SegmentationDecoder,
+    CrackDataset,
     prepare_dataframe,
+    run_training_pipeline,
 )
-from src.utils.train_maal import run_maal_training_pipeline
 
 
 class MultiTaskNetwork(nn.Module):
@@ -54,154 +49,77 @@ class MultiTaskNetwork(nn.Module):
         features = self.encoder(x)
         f_final = features[-1]
 
-        # 1. GERAR MAPAS DE SALIÊNCIA PRIMEIRO
+        x_cls_feat = self.avgpool(f_final)
+        x_cls_flat = torch.flatten(x_cls_feat, 1)
+        y_cls = self.fc(x_cls_flat)
+
         saliency_maps = []
         target_size = features[self.saliency_stages[0]].shape[2:]
-        
-        final_saliency_raw = None # Variável para guardar o mapa antes da interpolação
-        
         for idx, stage_idx in enumerate(self.saliency_stages):
             stage_feat = features[stage_idx]
             stage_map = self.saliency_heads[idx](stage_feat)
-            
-            # Capturamos o mapa da última camada com sua resolução original (antes do upsample)
-            # para que ele tenha o exato tamanho espacial de f_final
-            if stage_idx == self.saliency_stages[-1]:
-                final_saliency_raw = stage_map
-                
-            stage_map_up = F.interpolate(
+            stage_map = F.interpolate(
                 stage_map,
                 size=target_size,
                 mode='bilinear',
                 align_corners=True
             )
-            saliency_maps.append(stage_map_up)
+            saliency_maps.append(stage_map)
 
         saliency_stack = torch.cat(saliency_maps, dim=1)
         fused = self.fusion_conv(saliency_stack)
-
-        # 2. MECANISMO DE ATENÇÃO EXPLÍCITO (GATING)
-        # Transformamos o logit do último mapa de saliência em probabilidades [0, 1]
-        attention_weights = torch.sigmoid(final_saliency_raw)
-        
-        # Multiplicação Element-wise (Gating): 
-        # Fundo da imagem (atenção ~ 0) é "apagado". Trincas (atenção ~ 1) são preservadas.
-        # O Pytorch faz o broadcast automático do canal 1 para os 2048 canais de f_final.
-        f_attended = f_final * attention_weights
-
-        # 3. CLASSIFICAÇÃO (Agora guiada e restrita pela atenção)
-        # O AvgPool e a camada FC recebem apenas os pixels que a Saliência (MAAL) permitiu passar
-        x_cls_feat = self.avgpool(f_attended)
-        x_cls_flat = torch.flatten(x_cls_feat, 1)
-        y_cls = self.fc(x_cls_flat)
-
-        # 4. SEGMENTAÇÃO
         y_seg = self.decoder(features)
-        
         return y_cls, y_seg, fused, saliency_maps
 
-class MultiTaskLoss(nn.Module):
 
-    #MAAL
-    def __init__(self, w_cls=1.0, w_seg=1.0, w_align=1.0, num_scales=4):
-        """
-        w_cls: Peso da perda de classificação
-        w_seg: Peso da perda de segmentação
-        w_align: Peso total do módulo MAAL
-        num_scales: Número de camadas extraídas no encoder (padrão 4 para ResNet)
-        """
+class MultiTaskLoss(nn.Module):
+    def __init__(self, w_cls=1.0, w_seg=1.0, w_align=ALIGNMENT_WEIGHT):
         super(MultiTaskLoss, self).__init__()
         self.w_cls = w_cls
         self.w_seg = w_seg
         self.w_align = w_align
-        
         self.cls_criterion = nn.CrossEntropyLoss()
         self.seg_criterion = nn.BCEWithLogitsLoss()
-        
-        # Ponderador Adaptativo MAAL (alpha_l)
-        # Parâmetros aprendíveis inicializados com 1.0
-        self.alpha_weights = nn.Parameter(torch.ones(num_scales))
-        
-        self.current_epoch = 0
-        self.batch_count = 0
 
-    def set_epoch(self, epoch: int):
-        self.current_epoch = epoch
-        self.batch_count = 0 
-
-    def forward(self, y_cls_pred, y_cls_true, y_seg_pred, y_seg_true, saliency_maps):
-        # 1. Perdas Padrão das Tarefas
+    def forward(self, y_cls_pred, y_cls_true, y_seg_pred, y_seg_true, saliency_logits):
         loss_cls = self.cls_criterion(y_cls_pred, y_cls_true)
         loss_seg = self.seg_criterion(y_seg_pred, y_seg_true)
-        
-        # Inicializa a perda MAAL
-        loss_maal = torch.tensor(0.0, device=y_seg_true.device)
-        loss_align_bce_total = torch.tensor(0.0, device=y_seg_true.device)
-        loss_align_dice_total = torch.tensor(0.0, device=y_seg_true.device)
-        
-        # 2. Calcula os pesos adaptativos (Softmax garante que a soma de alpha_l = 1)
-        alphas = F.softmax(self.alpha_weights, dim=0)
-        
-        # 3. Cálculo do Alinhamento MAAL
-        # O alinhamento só faz sentido se a imagem contiver o defeito (classe positiva = 1)
-        positive_mask = (y_cls_true == 1)
-        
-        if positive_mask.any():
-            # Filtra apenas os Ground Truths das imagens com trincas
-            target_mask = y_seg_true[positive_mask] 
-            
-            # Itera sobre cada nível hierárquico (l)
-            for l, s_map in enumerate(saliency_maps):
-                # Faz o upsample do mapa de saliência para o tamanho original da imagem
-                s_map_up = F.interpolate(
-                    s_map, 
-                    size=y_seg_true.shape[2:], 
-                    mode='bilinear', 
-                    align_corners=True
-                )
-                
-                # Filtra as imagens positivas para o batch atual
-                cam_pos = s_map_up[positive_mask]
-                
-                # Perda de Alinhamento Local (L_align^(l)) - BCE
-                # Usa BCEWithLogits para empurrar as ativações da saliência em direção à máscara real
-                loss_align_l_bce = F.binary_cross_entropy_with_logits(cam_pos, target_mask)
-                
-                # Perda de Alinhamento Local (L_align^(l)) - Dice
-                # Calcula Dice em precisão FP32 para maior estabilidade numérica
-                with torch.cuda.amp.autocast(enabled=False):
-                    cam_fp32 = torch.sigmoid(cam_pos.float())
-                    mask_fp32 = target_mask.float()
-                    
-                    intersection = (cam_fp32 * mask_fp32).sum(dim=(1, 2, 3))
-                    union = cam_fp32.sum(dim=(1, 2, 3)) + mask_fp32.sum(dim=(1, 2, 3))
-                    dice_score = (2.0 * intersection + 1e-6) / (union + 1e-6)
-                    loss_align_l_dice = 1.0 - dice_score.mean()
-                
-                # Combina BCE + Dice
-                loss_align_l = loss_align_l_bce + loss_align_l_dice
-                
-                # Soma Ponderada Adaptativa (alpha_l * L_align^(l))
-                loss_maal += alphas[l] * loss_align_l
-                loss_align_bce_total = loss_align_bce_total + loss_align_l_bce.detach()
-                loss_align_dice_total = loss_align_dice_total + loss_align_l_dice.detach()
 
-        # 4. Perda Total do Modelo
-        total_loss = (self.w_cls * loss_cls) + (self.w_seg * loss_seg) + (self.w_align * loss_maal)
-        
-        # Diagnóstico: imprime componentes de perda nos primeiros 3 batches do primeiro epoch
-        self.batch_count += 1
-        if self.current_epoch == 0 and self.batch_count <= 3:
-            print(f"Batch {self.batch_count}: cls={loss_cls.item():.4f}, seg={loss_seg.item():.4f}, "
-                  f"align_bce={loss_align_bce_total.item():.4f}, align_dice={loss_align_dice_total.item():.4f}")
-        
+        saliency_upsampled = F.interpolate(
+            saliency_logits,
+            size=y_seg_true.shape[2:],
+            mode='bilinear',
+            align_corners=True
+        )
+
+        positive_mask = (y_cls_true == 1)
+
+        if positive_mask.any():
+            cam_pos = saliency_upsampled[positive_mask]
+            mask_pos = y_seg_true[positive_mask]
+
+            loss_align_bce = F.binary_cross_entropy_with_logits(cam_pos, mask_pos)
+
+            with torch.cuda.amp.autocast(enabled=False):
+                cam_fp32 = torch.sigmoid(cam_pos.float())
+                mask_fp32 = mask_pos.float()
+
+                intersection = (cam_fp32 * mask_fp32).sum(dim=(1, 2, 3))
+                union = cam_fp32.sum(dim=(1, 2, 3)) + mask_fp32.sum(dim=(1, 2, 3))
+                dice_score = (2.0 * intersection + 1e-6) / (union + 1e-6)
+                loss_align_dice = 1.0 - dice_score.mean()
+        else:
+            loss_align_bce = torch.tensor(0.0, device=y_seg_true.device)
+            loss_align_dice = torch.tensor(0.0, device=y_seg_true.device)
+
+        loss_align = loss_align_bce + loss_align_dice
+        total_loss = (self.w_cls * loss_cls) + (self.w_seg * loss_seg) + (self.w_align * loss_align)
         return total_loss, {
             "cls": loss_cls.detach(),
             "seg": loss_seg.detach(),
-            "align_bce": loss_align_bce_total.detach(),
-            "align_dice": loss_align_dice_total.detach(),
-            "align_maal": loss_maal.detach(),
-            "alphas": alphas.detach() # Permite monitorar qual camada a rede julga mais importante
+            "align_bce": loss_align_bce.detach(),
+            "align_dice": loss_align_dice.detach(),
+            "align": loss_align.detach()
         }
 
 
@@ -287,7 +205,7 @@ def visualize_model_predictions(model, loader, device, num_images=5, output_dir=
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Train MAAL multi-task model with checkpoint support.')
+    parser = argparse.ArgumentParser(description='Train fusion_cam multi-task model with checkpoint support.')
     parser.add_argument('--checkpoint-dir', default='checkpoints', help='Directory to save checkpoint files')
     parser.add_argument('--resume-from', default=None, help='Path to a checkpoint file to resume training from')
     args = parser.parse_args()
@@ -297,14 +215,30 @@ def main():
         print(f"DataFrame carregado com {len(df)} imagens.")
 
         if len(df) > 0:
-            run_maal_training_pipeline(
+            run_training_pipeline(
+                run_name='fusion_cam',
                 model_factory=lambda: MultiTaskNetwork(num_classes_cls=2, fusion_mode='learned_forward'),
-                criterion_factory=lambda: MultiTaskLoss(w_cls=1.0, w_seg=1.0, w_align=ALIGNMENT_WEIGHT, num_scales=4),
+                criterion_factory=lambda: MultiTaskLoss(w_cls=1.0, w_seg=1.0, w_align=ALIGNMENT_WEIGHT),
                 df=df,
                 n_splits=N_SPLITS,
                 checkpoint_dir=args.checkpoint_dir,
                 resume_from=args.resume_from
             )
+
+            # After training, log learned fusion weights for each fold if available
+            for fold in range(N_SPLITS):
+                best_path = os.path.join(args.checkpoint_dir, 'fusion_cam', f'fold_{fold}', 'best.pt')
+                if os.path.exists(best_path):
+                    ckpt = torch.load(best_path, map_location=DEVICE)
+                    model = MultiTaskNetwork(num_classes_cls=2, fusion_mode='learned_forward').to(DEVICE)
+                    model.load_state_dict(ckpt['model_state'])
+                    try:
+                        weights = model.fusion_conv.weight.data.squeeze().cpu().numpy()
+                        print(f"Fold {fold} fusion weights: {weights}")
+                    except Exception:
+                        print(f"Fold {fold} fusion weights: unable to read weights")
+                else:
+                    print(f"No best checkpoint for fold {fold} at {best_path}")
         else:
             print("DataFrame vazio. Verifique se o dataset foi gerado corretamente.")
     else:

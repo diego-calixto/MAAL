@@ -10,14 +10,14 @@ The table below shows the aggregated validation metrics across all 5 folds for e
 | :--- | :---: | :---: | :---: | :---: |
 | **Attention** | 0.9842 ± 0.0034 | **0.8570 ± 0.0129** | 0.9886 ± 0.0023 | N/A |
 | **baseline** | 0.9846 ± 0.0041 | **0.8550 ± 0.0094** | 0.9886 ± 0.0029 | 0.9032 ± 0.0076 |
-| **Fusion_CAM** | 0.9852 ± 0.0043 | **0.8550 ± 0.0101** | 0.9890 ± 0.0029 | 0.9028 ± 0.0083 |
+| **MAAL** | 0.9852 ± 0.0043 | **0.8550 ± 0.0101** | 0.9890 ± 0.0029 | 0.9028 ± 0.0083 |
 | **CAM** | 0.9860 ± 0.0039 | **0.8546 ± 0.0138** | 0.9894 ± 0.0029 | 0.9028 ± 0.0117 |
-| **MAAL** | 0.9854 ± 0.0037 | **0.8512 ± 0.0138** | 0.9903 ± 0.0030 | N/A |
+| **MAAL_V2** | 0.9854 ± 0.0037 | **0.8512 ± 0.0138** | 0.9903 ± 0.0030 | N/A |
 | **MAAL_V2** | 0.9856 ± 0.0052 | **0.8482 ± 0.0185** | 0.9903 ± 0.0030 | N/A |
 
 > [!NOTE]
 > * **Attention** does not log validation Dice score in the job output.
-> * **MAAL** and **MAAL_V2** do not log validation F1 and Dice scores in the job output.
+> * **MAAL_V2** and **MAAL_V2** do not log validation F1 and Dice scores in the job output.
 
 ## Detailed Metrics fold-by-fold
 
@@ -35,16 +35,16 @@ Here are the individual metrics extracted for the best checkpoints of each fold 
 | CAM | Fold 3 | Epoch 30 | 0.9810 | 0.8380 | 0.9860 | 0.8900 |
 | CAM | Fold 4 | Epoch 29 | 0.9850 | 0.8480 | 0.9890 | 0.8950 |
 | CAM | Fold 5 | Epoch 28 | 0.9860 | 0.8690 | 0.9890 | 0.9130 |
-| Fusion_CAM | Fold 1 | Epoch 27 | 0.9880 | 0.8570 | 0.9910 | 0.9050 |
-| Fusion_CAM | Fold 2 | Epoch 27 | 0.9830 | 0.8600 | 0.9870 | 0.9070 |
-| Fusion_CAM | Fold 3 | Epoch 30 | 0.9840 | 0.8430 | 0.9880 | 0.8920 |
-| Fusion_CAM | Fold 4 | Epoch 30 | 0.9910 | 0.8680 | 0.9930 | 0.9130 |
-| Fusion_CAM | Fold 5 | Epoch 25 | 0.9800 | 0.8470 | 0.9860 | 0.8970 |
-| MAAL | Fold 1 | Epoch 23 | 0.9860 | 0.8540 | 0.9912 | N/A |
-| MAAL | Fold 2 | Epoch 30 | 0.9860 | 0.8620 | 0.9892 | N/A |
-| MAAL | Fold 3 | Epoch 26 | 0.9820 | 0.8340 | 0.9890 | N/A |
-| MAAL | Fold 4 | Epoch 30 | 0.9910 | 0.8660 | 0.9949 | N/A |
-| MAAL | Fold 5 | Epoch 21 | 0.9820 | 0.8400 | 0.9871 | N/A |
+| MAAL | Fold 1 | Epoch 27 | 0.9880 | 0.8570 | 0.9910 | 0.9050 |
+| MAAL | Fold 2 | Epoch 27 | 0.9830 | 0.8600 | 0.9870 | 0.9070 |
+| MAAL | Fold 3 | Epoch 30 | 0.9840 | 0.8430 | 0.9880 | 0.8920 |
+| MAAL | Fold 4 | Epoch 30 | 0.9910 | 0.8680 | 0.9930 | 0.9130 |
+| MAAL | Fold 5 | Epoch 25 | 0.9800 | 0.8470 | 0.9860 | 0.8970 |
+| MAAL_V2 | Fold 1 | Epoch 23 | 0.9860 | 0.8540 | 0.9912 | N/A |
+| MAAL_V2 | Fold 2 | Epoch 30 | 0.9860 | 0.8620 | 0.9892 | N/A |
+| MAAL_V2 | Fold 3 | Epoch 26 | 0.9820 | 0.8340 | 0.9890 | N/A |
+| MAAL_V2 | Fold 4 | Epoch 30 | 0.9910 | 0.8660 | 0.9949 | N/A |
+| MAAL_V2 | Fold 5 | Epoch 21 | 0.9820 | 0.8400 | 0.9871 | N/A |
 | MAAL_V2 | Fold 1 | Epoch 23 | 0.9860 | 0.8500 | 0.9912 | N/A |
 | MAAL_V2 | Fold 2 | Epoch 30 | 0.9920 | 0.8670 | 0.9892 | N/A |
 | MAAL_V2 | Fold 3 | Epoch 26 | 0.9840 | 0.8370 | 0.9890 | N/A |
